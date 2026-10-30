@@ -1,26 +1,26 @@
-import queue
-import ctypes
-import io
-import copy
-import struct
-import unicodedata
-import os
-import dataclasses
 from dataclasses import dataclass
-import re
+import copy
+import ctypes
+import dataclasses
+import io
 import multiprocessing as mp
 import multiprocessing.queues as mpq
 import multiprocessing.sharedctypes as mpsct
+import os
+import queue
+import re
+import struct
+import typing
+import unicodedata
+import zipfile
 
-import glfw
-import OpenGL.GL as gl
 from slimgui import imgui
 from slimgui.imgui import StyleVar, WindowFlags, DragDropFlags, MouseButton, ItemFlags
 from slimgui.integrations.glfw import GlfwRenderer
-import crossfiledialog
-import zipfile
-import typing
+import OpenGL.GL as gl
 import chardet
+import crossfiledialog
+import glfw
 import typst
 
 TYPST_PRELUDE = """
