@@ -10,4 +10,6 @@ dependencies = [
     "pyopengl",
     "numpy",
     "typst",
+    "crossfiledialog",
+    "chardet",
 ]
