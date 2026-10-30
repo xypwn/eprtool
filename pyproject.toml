@@ -12,4 +12,6 @@ dependencies = [
     "typst",
     "crossfiledialog",
     "chardet",
+    "platformdirs",
+    "tomli-w>=1.2.0",
 ]
