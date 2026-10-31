@@ -26,7 +26,6 @@ import chardet
 import crossfiledialog
 import glfw
 import typst
-import xdg_base_dirs
 import tomllib
 import tomli_w
 import platformdirs
