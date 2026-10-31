@@ -1,0 +1,65 @@
+uv pip install pyinstaller
+uv run pyinstaller --clean src/eprtool/__init__.py --onefile --windowed --copy-metadata sl
+imgui --collect-all glfw --collect-all OpenGL
+
+on:
+  release:
+    types: [created]
+
+permissions:
+    contents: write
+    packages: write
+
+jobs:
+  release-windows:
+    name: Release Windows Binary
+    runs-on: windows-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    - name: Install uv by astral.sh
+      run: powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+    - name: Build eprtool executable
+      run: |
+        uv venv
+        uv pip install pyinstaller
+        uv run pyinstaller `
+          src/eprtool/__init__.py `
+          --onefile --windowed `
+          --copy-metadata slimgui `
+          --collect-all glfw --collect-all OpenGL
+    - name: Rename executable
+      run: mv dist/__init__.exe eprtool.exe
+    - name: Upload executable
+      uses: softprops/action-gh-release@v3
+      if: startsWith(github.ref, 'refs/tags/')
+      with:
+        files: eprtool.exe
+
+  release-linux:
+    name: Release Linux Binary
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    - name: Install uv by astral.sh
+      run: curl -LsSf https://astral.sh/uv/install.sh | sh
+    - name: Build eprtool executable
+      run: |
+        uv venv
+        uv pip install pyinstaller
+        uv run pyinstaller \
+          src/eprtool/__init__.py \
+          --onefile --windowed \
+          --copy-metadata slimgui \
+          --collect-all glfw --collect-all OpenGL
+    - name: Rename executable
+      run: mv dist/__init__ eprtool
+    - name: Create archive
+      run: |
+        tar cJf eprtool-linux.tar.xz eprtool
+    - name: Upload archive
+      uses: softprops/action-gh-release@v3
+      if: startsWith(github.ref, 'refs/tags/')
+      with:
+        files: eprtool-linux.tar.xz
