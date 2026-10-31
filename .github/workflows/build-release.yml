@@ -18,6 +18,7 @@ jobs:
     - name: Build eprtool executable
       run: |
         uv venv
+        uv sync
         uv pip install pyinstaller
         uv run pyinstaller `
           src/eprtool/__init__.py `
@@ -43,6 +44,7 @@ jobs:
     - name: Build eprtool executable
       run: |
         uv venv
+        uv sync
         uv pip install pyinstaller
         uv run pyinstaller \
           src/eprtool/__init__.py \
