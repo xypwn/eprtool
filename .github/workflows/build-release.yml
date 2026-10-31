@@ -1,7 +1,3 @@
-uv pip install pyinstaller
-uv run pyinstaller --clean src/eprtool/__init__.py --onefile --windowed --copy-metadata sl
-imgui --collect-all glfw --collect-all OpenGL
-
 on:
   release:
     types: [created]
