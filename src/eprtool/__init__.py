@@ -332,10 +332,14 @@ def _task_export_to_feedback_folder(ctx: Context, state: State) -> State:
                 file_path = os.path.join(subm_dir, finfo.custom_filename)
                 os.makedirs(os.path.dirname(file_path), exist_ok=True)
                 with open(file_path, "wb") as f:
-                    assert isinstance(fdata, bytes)
                     f.write(fdata)
             else:
                 assert isinstance(fdata, str)
+                file_path = os.path.join(subm_dir, "code", finfo.custom_filename)
+                os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                with open(file_path, "w") as f:
+                    f.write(fdata)
+
                 if typst_code == "":
                     typst_code += TYPST_PRELUDE.replace(
                         "{title}", state.title).replace(
@@ -391,7 +395,7 @@ def _task_pack_feedback_zip(ctx: Context, state: State) -> None:
                 else:
                     assert finfo["kind"] == "ignore"
             if have_code:
-                    ar.write(os.path.join(subm_dir, filename_with_suffix("code.pdf", state.settings.pdf_annotated_suffix)),
+                    ar.write(os.path.join(subm_dir, filename_with_suffix(f"{subm["stud-name"]}_{subm["stud-id"]}_code.pdf", state.settings.pdf_annotated_suffix)),
                         arcname=f"{subm_zip_dir}/Feedback_{title}_{subm["stud-name"]}_code.pdf")
 
 def draw_gui(state: State, task_mgr: TaskManager) -> None:
