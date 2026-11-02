@@ -21,8 +21,8 @@ In "Settings":
 
 #### 1. Open submission ZIP
 Use the "Open submission ZIP" button to select a ZIP file downloaded from moodle via "Download all submissions".
-#### 2. Select title
-In the "title" text box, set the task title, e.g. "Uebung 0" (since it cannot be inferred automatically).
+#### 2. Ensure excercise and group are correct
+The tool should guess excercise and group correctly from the title, but if it didn't manage to guess or guessed incorrectly, you can adjust them in the respective text boxes.
 #### 3. Organize files
 You will see all submissions in the left. Go through all of them and make sure all files are in the right order (drag to rearrange), have the right name and tag (double-click to edit).
 

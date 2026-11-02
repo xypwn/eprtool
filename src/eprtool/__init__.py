@@ -76,6 +76,13 @@ TYPST_PRELUDE = """
 def imgui_is_item_double_clicked(mouse_button: MouseButton = MouseButton.LEFT) -> bool:
     return imgui.is_item_clicked(mouse_button) and imgui.is_mouse_double_clicked(mouse_button)
 
+def imgui_object_field_input_text(label: str, obj: object, obj_field: str, hint: str = "", flags: imgui.InputTextFlags = imgui.InputTextFlags.NONE) -> bool:
+    s = obj.__dict__[obj_field]
+    changed, s_new = imgui.input_text_with_hint(label, hint, s, flags)
+    if changed:
+        obj.__dict__[obj_field] = s_new
+    return changed
+
 def default_field(x):
     return dataclasses.field(default_factory=lambda: copy.deepcopy(x))
 
@@ -91,15 +98,40 @@ class SubmissionArchive:
 
 RE_SUBMISSION_FILE = re.compile(r"^(?P<name>[^ ]+ [^_]+)_(?P<id>\d+)_assignsubmission_file/(?P<file>[^/]+)$")
 
-def submission_archives_from_zip(filename: str) -> list[SubmissionArchive]:
+# Submission may be ZIP or single file
+def submission_files_from_zip(filename: str) -> list[SubmissionArchive]:
     # Automatically decodes bytes into a string, guessing the encoding.
     def auto_str(b: bytes) -> str:
         enc = chardet.detect(b, include_encodings=["utf-8", "437"])["encoding"]
         assert enc is not None
         return b.decode(enc)
 
-    def submission_archive_to_files(inp: typing.IO[bytes]) -> dict[str, str|bytes]:
+    # Returns single file, or unarchives a ZIP into multiple files.
+    def submission_file_to_files(submission_filename: str, inp: typing.IO[bytes]) -> dict[str, str|bytes]:
+        def file_to_str_or_bytes(filename: str, f: typing.IO[bytes]) -> str|bytes|None:
+            ext = os.path.splitext(filename)[1].lower()
+            if ext == ".py":
+                is_text = True
+            elif os.path.basename(filename).lower() in ("readme", "readme.md", "readme.txt"):
+                is_text = True
+            elif ext in (".pdf", ".png", ".jpg", ".jpeg"):
+                is_text = False
+            else:
+                print(f"unrecognized file type for {filename} in {submission_filename}") # TODO!!!!
+                return None
+            if is_text:
+                return auto_str(f.read())
+            else:
+                return f.read()
+
         res: dict[str, str|bytes] = {}
+
+        if os.path.splitext(submission_filename)[1].lower() != ".zip":
+            data = file_to_str_or_bytes(submission_filename, inp)
+            if data is not None:
+                res[submission_filename] = data
+            return res
+
         with zipfile.ZipFile(inp) as ar:
             for finfo in ar.filelist:
                 filename = finfo.filename
@@ -108,28 +140,17 @@ def submission_archives_from_zip(filename: str) -> list[SubmissionArchive]:
                     # (some archivers don't seem to set the flag properly).
                     filename = auto_str(finfo.filename.encode('437'))
                 filename = unicodedata.normalize("NFC", filename)
-                is_text = False
-                if "__MACOSX" in finfo.filename.split("/"):
+                if any(s in ("__MACOSX", ".DS_Store") for s in finfo.filename.split("/")):
                     continue
                 if finfo.is_dir():
                     continue
-                ext = os.path.splitext(filename)[1]
-                if ext == ".py":
-                    is_text = True
-                elif os.path.basename(filename).lower() in ("readme", "readme.md", "readme.txt"):
-                    is_text = True
-                elif ext == ".pdf":
-                    is_text = False
-                else:
-                    print(f"unrecognized file type for {filename}") # TODO!!!!
-                    continue
-                if not finfo.is_dir():
-                    with ar.open(finfo.filename) as f:
-                        if is_text:
-                            res[filename] = auto_str(f.read())
-                        else:
-                            res[filename] = f.read()
+                with ar.open(finfo.filename) as f:
+                    data = file_to_str_or_bytes(filename, f)
+                    if data is None:
+                        continue
+                    res[filename] = data
         return res
+
 
     submissions = []
     with zipfile.ZipFile(filename, "r") as sub:
@@ -138,14 +159,11 @@ def submission_archives_from_zip(filename: str) -> list[SubmissionArchive]:
             if m is None:
                 print(f"skipping file {fname}")
                 continue
-            if os.path.splitext(fname)[1] != ".zip":
-                print(f"invalid submission file type for {fname}")
-                continue
             submissions.append(SubmissionArchive(
                 m["name"],
                 m["id"],
                 fname,
-                submission_archive_to_files(sub.open(fname)),
+                submission_file_to_files(fname, sub.open(fname)),
             ))
     submissions.sort(key=lambda s: s.folder_name())
     return submissions
@@ -171,7 +189,8 @@ class State:
     subms: list[SubmissionArchive]|None = None
     subm_idx: int = 0
     subm_files_ordered: list[list[SubmissionFileInfo]] = default_field([])
-    title: str = ""
+    excercise: str = ""
+    group: str = ""
 
     editing_file_info_idx: int|None = None
     focus_editing_file_info: bool = False
@@ -263,6 +282,8 @@ class TaskManager:
         self.msgq.close()
         self.proc.close()
 
+RE_GUESS_EXCERCISE_GROUP = re.compile(r"^[\w ]+?\d+[\w -]+?(?P<ex>\d+)[\w -]+?(?P<gr>\d+)", re.UNICODE)
+
 def _task_open_submission_zip(ctx: Context, state: State) -> State:
     ctx.msgq.put(Status("choosing file"))
 
@@ -270,8 +291,15 @@ def _task_open_submission_zip(ctx: Context, state: State) -> State:
     #fname = filedialog.askopenfilename(filetypes=(("ZIP Archive", "*.zip"),), title="Open submission archive")
     fname = crossfiledialog.open_file("Open submission archive",
         state.dirs.user_downloads_dir, "*.zip")
+
+    # Guess excercise title and group
+    m = RE_GUESS_EXCERCISE_GROUP.match(os.path.basename(fname))
+    if m is not None:
+        state.excercise = f"Uebung {m["ex"]}"
+        state.group = f"EPR{m["gr"]}"
+
     if fname != "":
-        state.subms = submission_archives_from_zip(fname)
+        state.subms = submission_files_from_zip(fname)
         state.subm_files_ordered = []
         for i, subm in enumerate(state.subms):
             state.subm_files_ordered.append([])
@@ -298,19 +326,23 @@ def _task_open_submission_zip(ctx: Context, state: State) -> State:
                     finfo.custom_filename = "/".join(finfo.custom_filename.split("/")[1:])
     return state
 
-RE_VALID_TITLE = re.compile(r"^[\w\-. ]+$")
+RE_VALID_EXCERCISE_TITLE = re.compile(r"^[\w\-. ]+$")
 
 def _task_export_to_feedback_folder(ctx: Context, state: State) -> State:
-    if RE_VALID_TITLE.match(state.title) is None:
-        raise Exception("Invalid title")
+    if RE_VALID_EXCERCISE_TITLE.match(state.excercise) is None:
+        raise Exception("Invalid excercise title")
     assert state.subms is not None
     ctx.msgq.put(Status("choosing destination"))
     folder_name = crossfiledialog.choose_folder("Choose output folder",
         os.path.dirname(state.last_exported_folder) if state.last_exported_folder != "" else None)
     if folder_name == "":
         return state
-    tomldata = {"submissions": {}}
-    out_dir = os.path.join(folder_name, state.title)
+    tomldata = {
+        "excercise": state.excercise,
+        "group": state.group,
+        "submissions": {},
+    }
+    out_dir = os.path.join(folder_name, f"{state.excercise}_{state.group}")
     for i, subm in enumerate(state.subms):
         subm_dir = os.path.join(out_dir, subm.folder_name())
         tomldata["submissions"][subm.stud_id] = {
@@ -342,7 +374,7 @@ def _task_export_to_feedback_folder(ctx: Context, state: State) -> State:
 
                 if typst_code == "":
                     typst_code += TYPST_PRELUDE.replace(
-                        "{title}", state.title).replace(
+                        "{title}", state.excercise).replace(
                         "{name}", subm.stud_name).replace(
                         "{tutor}", state.settings.tutor)
                 else:
@@ -370,17 +402,18 @@ def _task_pack_feedback_zip(ctx: Context, state: State) -> None:
         state.last_exported_folder if state.last_exported_folder != "" else None)
     if folder_name == "":
         return
-    title = os.path.basename(folder_name)
-    if RE_VALID_TITLE.match(title) is None:
-        raise Exception("Invalid title")
     with open(os.path.join(folder_name, "eprtool.toml"), "rb") as f:
         tomldata = tomllib.load(f)
+
+    excercise, group = tomldata["excercise"], tomldata["group"]
+    assert isinstance(excercise, str)
+    assert isinstance(group, str)
 
     def filename_with_suffix(fname: str, suffix: str) -> str:
         root, ext = os.path.splitext(fname)
         return root+suffix+ext
 
-    zip_name = os.path.join(folder_name, title+"_annotated.zip")
+    zip_name = os.path.join(folder_name, os.path.basename(folder_name)+"_annotated.zip")
     with zipfile.ZipFile(zip_name, "w") as ar:
         for subm in tomldata["submissions"].values():
             subm_dir = os.path.join(folder_name, f"{subm["stud-name"]}_{subm["stud-id"]}")
@@ -391,12 +424,12 @@ def _task_pack_feedback_zip(ctx: Context, state: State) -> None:
                     have_code = True
                 elif finfo["kind"] == "documentation":
                     ar.write(os.path.join(subm_dir, filename_with_suffix(finfo["custom-name"], state.settings.pdf_annotated_suffix)),
-                        arcname=f"{subm_zip_dir}/Feedback_{title}_{subm["stud-name"]}_{finfo["custom-name"]}")
+                        arcname=f"{subm_zip_dir}/Feedback_{excercise}_{subm["stud-name"]}_{finfo["custom-name"]}")
                 else:
                     assert finfo["kind"] == "ignore"
             if have_code:
                     ar.write(os.path.join(subm_dir, filename_with_suffix(f"{subm["stud-name"]}_{subm["stud-id"]}_code.pdf", state.settings.pdf_annotated_suffix)),
-                        arcname=f"{subm_zip_dir}/Feedback_{title}_{subm["stud-name"]}_code.pdf")
+                        arcname=f"{subm_zip_dir}/Feedback_{excercise}_{subm["stud-name"]}_code.pdf")
 
 def draw_gui(state: State, task_mgr: TaskManager) -> None:
     imgui.begin_disabled(task_mgr.working)
@@ -435,10 +468,10 @@ def draw_gui(state: State, task_mgr: TaskManager) -> None:
             state.settings_saved = True
 
     if state.subms is not None:
-        title_changed, title = imgui.input_text_with_hint("Title", "e.g. Uebung 0", state.title)
-        if title_changed:
-            state.title = title
+        imgui_object_field_input_text("Excercise", state, "excercise", "e.g. Uebung 0")
+        imgui_object_field_input_text("Group", state, "group", "e.g. EPR01")
         imgui.begin_child("submissions", (150, 0), imgui.ChildFlags.BORDERS|imgui.ChildFlags.RESIZE_X)
+        imgui.separator_text(f"{len(state.subms)} submissions")
         for i, s in enumerate(state.subms):
             if imgui.selectable(f"{s.stud_name} ({s.stud_id})", i == state.subm_idx, imgui.SelectableFlags.SELECT_ON_NAV)[0]:
                 state.subm_idx = i
