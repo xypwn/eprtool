@@ -2,7 +2,7 @@ import pkgutil
 import time
 import traceback
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import copy
 import ctypes
 import dataclasses
@@ -21,7 +21,7 @@ import zipfile
 import tkinter.filedialog as filedialog
 
 from slimgui import imgui
-from slimgui.imgui import StyleVar, WindowFlags, DragDropFlags, MouseButton, ItemFlags, Cond, Col
+from slimgui.imgui import StyleVar, WindowFlags, DragDropFlags, MouseButton, ItemFlags, Cond, Col, FLT_MAX, ChildFlags
 from slimgui.integrations.glfw import GlfwRenderer
 import OpenGL.GL as gl
 import chardet
@@ -31,6 +31,7 @@ import typst
 import tomllib
 import tomli_w
 import platformdirs
+from showinfm import show_in_file_manager
 
 TYPST_PRELUDE = """
 #import "@preview/codly:2.0.0" as codly
@@ -75,8 +76,24 @@ TYPST_PRELUDE = """
 #v(1em)
 """
 
-_imgui_font_mono: imgui.Font|None = None
+def write_file(path: str, data: bytes|str) -> None:
+    dir = os.path.dirname(path)
+    if dir:
+        os.makedirs(dir, exist_ok=True)
+    if isinstance(data, bytes):
+        with open(path, "wb") as f: f.write(data)
+    else:
+        with open(path, "w") as f: f.write(data)
 
+def read_file_bytes(path: str) -> bytes:
+    with open(path, "rb") as f:
+        return f.read()
+
+def read_file_str(path: str) -> str:
+    with open(path, "r") as f:
+        return f.read()
+
+_imgui_font_mono: imgui.Font|None = None
 def font_mono() -> imgui.Font:
     assert _imgui_font_mono is not None
     return _imgui_font_mono
@@ -91,8 +108,38 @@ def imgui_object_field_input_text(label: str, obj: object, obj_field: str, hint:
         obj.__dict__[obj_field] = s_new
     return changed
 
+def imgui_align_button_row(labels: typing.Iterable[str], align: typing.Literal["left", "right", "center"]) -> None:
+    style = imgui.get_style()
+    labels = list(labels)
+
+    if align != "left":
+        width = 0
+        for s in labels:
+            width += imgui.calc_text_size(s)[0]
+        width += 2*style.frame_padding[0]*len(labels)
+        width += style.item_spacing[0]*(len(labels)-1)
+
+    cx, cy = imgui.get_cursor_screen_pos()
+    match align:
+        case "right":
+            cx += imgui.get_content_region_avail()[0]
+            cx -= width
+        case "center":
+            cx += imgui.get_content_region_avail()[0]/2
+            cx -= width/2
+    imgui.set_cursor_screen_pos((cx, cy))
+
 def default_field(x):
     return dataclasses.field(default_factory=lambda: copy.deepcopy(x))
+
+TYPST_IMAGE_FORMATS = {
+    ".png": "png",
+    ".jpg": "jpg",
+    ".jpeg": "jpg",
+    ".svg": "svg",
+    ".pdf": "pdf",
+    ".webp": "webp",
+}
 
 @dataclass
 class SubmissionArchive:
@@ -106,13 +153,21 @@ class SubmissionArchive:
 
 RE_SUBMISSION_FILE = re.compile(r"^(?P<name>[^ ]+ [^_]+)_(?P<id>\d+)_assignsubmission_file/(?P<file>[^/]+)$")
 
+@dataclass
+class SubmissionFilesResult:
+    submissions: list[SubmissionArchive] = default_field([])
+    skipped_files: list[str] = default_field([])
+    unrecognized_files: list[str] = default_field([])
+
 # Submission may be ZIP or single file
-def submission_files_from_zip(filename: str) -> list[SubmissionArchive]:
+def submission_files_from_zip(filename: str) -> SubmissionFilesResult:
     # Automatically decodes bytes into a string, guessing the encoding.
     def auto_str(b: bytes) -> str:
         enc = chardet.detect(b, include_encodings=["utf-8", "437"])["encoding"]
         assert enc is not None
         return b.decode(enc)
+
+    result = SubmissionFilesResult()
 
     # Returns single file, or unarchives a ZIP into multiple files.
     def submission_file_to_files(submission_filename: str, inp: typing.IO[bytes]) -> dict[str, str|bytes]:
@@ -122,23 +177,23 @@ def submission_files_from_zip(filename: str) -> list[SubmissionArchive]:
                 is_text = True
             elif os.path.basename(filename).lower() in ("readme", "readme.md", "readme.txt"):
                 is_text = True
-            elif ext in (".pdf", ".png", ".jpg", ".jpeg"):
+            elif ext == ".pdf" or ext in TYPST_IMAGE_FORMATS:
                 is_text = False
             else:
-                print(f"unrecognized file type for {filename} in {submission_filename}") # TODO!!!!
+                result.unrecognized_files.append(submission_filename+"/"+filename)
                 return None
             if is_text:
                 return auto_str(f.read())
             else:
                 return f.read()
 
-        res: dict[str, str|bytes] = {}
+        files: dict[str, str|bytes] = {}
 
         if os.path.splitext(submission_filename)[1].lower() != ".zip":
             data = file_to_str_or_bytes(submission_filename, inp)
             if data is not None:
-                res[submission_filename] = data
-            return res
+                files[submission_filename] = data
+            return files
 
         with zipfile.ZipFile(inp) as ar:
             for finfo in ar.filelist:
@@ -156,27 +211,25 @@ def submission_files_from_zip(filename: str) -> list[SubmissionArchive]:
                     data = file_to_str_or_bytes(filename, f)
                     if data is None:
                         continue
-                    res[filename] = data
-        return res
+                    files[filename] = data
+        return files
 
-
-    submissions = []
     with zipfile.ZipFile(filename, "r") as sub:
         for fname in sub.namelist():
             m = RE_SUBMISSION_FILE.match(fname)
             if m is None:
-                print(f"skipping file {fname}")
+                result.skipped_files.append(fname)
                 continue
-            submissions.append(SubmissionArchive(
+            result.submissions.append(SubmissionArchive(
                 m["name"],
                 m["id"],
                 fname,
                 submission_file_to_files(fname, sub.open(fname)),
             ))
-    submissions.sort(key=lambda s: s.folder_name())
-    return submissions
+    result.submissions.sort(key=lambda s: s.folder_name())
+    return result
 
-SubmissionFileKindTag = typing.Literal["code", "documentation", "ignore"]
+SubmissionFileKindTag = typing.Literal["embed", "separate", "ignore"]
 
 @dataclass
 class SubmissionFileInfo:
@@ -186,8 +239,8 @@ class SubmissionFileInfo:
 
 @dataclass
 class Settings:
-    tutor: str = ""
-    pdf_annotated_suffix: str = "_kommentiert"
+    group_tutor: str = field(default="", metadata={"label": "Group and tutor", "hint": "e.g. EPR01 - Firstname"})
+    pdf_suffix: str = field(default="_kommentiert", metadata={"label": "PDF suffix", "tooltip": "E.g. for xournalpp: German -> _kommentiert, English -> _annotated"})
 
 # State that can be passed to tasks
 @dataclass
@@ -204,6 +257,10 @@ class State:
     focus_editing_file_info: bool = False
 
     last_exported_folder: str = ""
+
+    info_popup: str = ""
+    info_popup_show_file: str = ""
+    info_popup_show_folder: str = ""
 
     settings: Settings = default_field(Settings())
     settings_saved: bool = True
@@ -228,7 +285,6 @@ class Task:
 class Stop:
     def __eq__(self, other):
         return isinstance(other, Stop)
-    pass
 
 # Context passed to any task function
 @dataclass
@@ -308,7 +364,8 @@ def _task_open_submission_zip(ctx: Context, state: State) -> State:
         state.excercise = f"Uebung {m["ex"]}"
         state.group = f"EPR{m["gr"]}"
 
-    state.subms = submission_files_from_zip(fname)
+    submission_files = submission_files_from_zip(fname)
+    state.subms = submission_files.submissions
     state.subm_files_ordered = []
     for i, subm in enumerate(state.subms):
         state.subm_files_ordered.append([])
@@ -316,7 +373,7 @@ def _task_open_submission_zip(ctx: Context, state: State) -> State:
             state.subm_files_ordered[i].append(SubmissionFileInfo(
                 fname,
                 fname,
-                "code" if fname.lower().endswith(".py") else "documentation",
+                "separate" if fname.lower().endswith(".pdf") else "embed",
                 ))
     # If all filenames in a submission share a common first path element,
     # strip that by default.
@@ -333,6 +390,12 @@ def _task_open_submission_zip(ctx: Context, state: State) -> State:
         if strip_first_elem:
             for finfo in ordered_finfos:
                 finfo.custom_filename = "/".join(finfo.custom_filename.split("/")[1:])
+
+    if submission_files.skipped_files:
+        state.info_popup += f"- Skipped {len(submission_files.skipped_files)} files in the submission archive that didn't look like submissions: {submission_files.skipped_files}\n"
+    if submission_files.unrecognized_files:
+        state.info_popup += f"- Failed to recognize type of {len(submission_files.unrecognized_files)} submitted files: {submission_files.unrecognized_files}\n"
+
     return state
 
 RE_VALID_EXCERCISE_TITLE = re.compile(r"^[\w\-. ]+$")
@@ -351,6 +414,7 @@ def _task_export_to_feedback_folder(ctx: Context, state: State) -> State:
         "group": state.group,
         "submissions": {},
     }
+    num_pdfs = 0
     out_dir = os.path.join(folder_name, f"{state.excercise}_{state.group}")
     for i, subm in enumerate(state.subms):
         subm_dir = os.path.join(out_dir, subm.folder_name())
@@ -359,7 +423,8 @@ def _task_export_to_feedback_folder(ctx: Context, state: State) -> State:
             "stud-id": subm.stud_id,
             "files": [],
         }
-        typst_code = ""
+        ctx.msgq.put(Status(f"Unpacking files and compiling PDFs ({i}/{len(state.subms)})", i/len(state.subms)))
+        typst_code: list[str] = []
         for finfo in state.subm_files_ordered[i]:
             tomldata["submissions"][subm.stud_id]["files"].append({
                 "name": finfo.filename,
@@ -369,50 +434,49 @@ def _task_export_to_feedback_folder(ctx: Context, state: State) -> State:
             fdata = state.subms[i].files[finfo.filename]
             if finfo.kind == "ignore":
                 continue
-            if isinstance(fdata, bytes):
-                file_path = os.path.join(subm_dir, finfo.custom_filename)
-                os.makedirs(os.path.dirname(file_path), exist_ok=True)
-                with open(file_path, "wb") as f:
-                    f.write(fdata)
-            else:
-                assert isinstance(fdata, str)
-                file_path = os.path.join(subm_dir, "code", finfo.custom_filename)
-                os.makedirs(os.path.dirname(file_path), exist_ok=True)
-                with open(file_path, "w") as f:
-                    f.write(fdata)
 
-                if typst_code == "":
-                    typst_code += TYPST_PRELUDE.replace(
+            write_file(os.path.join(subm_dir, "files", finfo.custom_filename), fdata)
+            if finfo.kind == "embed":
+                code = ""
+                code += f"== `{finfo.custom_filename}`\n"
+                ext = os.path.splitext(finfo.custom_filename)[1].lower()
+                if isinstance(fdata, str):
+                    lang = "py"
+                    if not ext == ".py":
+                        lang = "md" # TODO: more precise guessing
+                    code += f"#codly.new(```{lang}\n{fdata}\n```)\n"
+                else:
+                    assert isinstance(fdata, bytes)
+                    code += f"#image(bytes(({"".join(str(b)+"," for b in fdata)})),\nwidth: 100%, format: \"{TYPST_IMAGE_FORMATS[ext]}\")\n"
+                typst_code.append(code)
+            else:
+                assert finfo.kind == "separate"
+                write_file(os.path.join(subm_dir, finfo.custom_filename), fdata)
+        if len(typst_code):
+            code = TYPST_PRELUDE.replace(
                         "{title}", state.excercise).replace(
                         "{name}", subm.stud_name).replace(
-                        "{tutor}", state.settings.tutor)
-                else:
-                    typst_code += f"#pagebreak()\n"
-                lang = "py"
-                if not finfo.custom_filename.endswith(".py"):
-                    lang = "md" # TODO: more precise guessing
-                typst_code += f"== `{finfo.custom_filename}`\n"
-                typst_code += f"#codly.new(```{lang}\n{fdata}\n```)\n"
-        if typst_code != "":
-            file_path = os.path.join(subm_dir, f"{subm.stud_name}_{subm.stud_id}_code.pdf")
-            os.makedirs(os.path.dirname(file_path), exist_ok=True)
-            ctx.msgq.put(Status(f"compiling code for {subm.stud_name} ({i}/{len(state.subms)})", i/len(state.subms)))
-            out = typst.compile(typst_code.encode("utf-8"))
-            with open(file_path, "wb") as f:
-                f.write(out)
+                        "{tutor}", state.settings.group_tutor)
+            code += "#pagebreak()\n".join(typst_code)
+            write_file(
+                os.path.join(subm_dir, f"{subm.stud_name}_{subm.stud_id}.pdf"),
+                typst.compile(code.encode("utf-8")))
+            num_pdfs += 1
     state.last_exported_folder = out_dir
-    with open(os.path.join(out_dir, "eprtool.toml"), "wb") as f:
-        tomli_w.dump(tomldata, f)
+    write_file(os.path.join(out_dir, "eprtool.toml"),
+        tomli_w.dumps(tomldata))
+    state.info_popup = f"Exported {len(state.subms)} submissions (generated {num_pdfs} PDFs)"
+    state.info_popup_show_folder = out_dir
     return state
 
-def _task_pack_feedback_zip(ctx: Context, state: State) -> None:
+def _task_pack_feedback_zip(ctx: Context, state: State) -> State:
     ctx.msgq.put(Status("choosing feedback folder"))
     folder_name = crossfiledialog.choose_folder("Choose feedback folder",
         state.last_exported_folder if state.last_exported_folder != "" else None)
     if folder_name == "" or folder_name is None:
-        return
-    with open(os.path.join(folder_name, "eprtool.toml"), "rb") as f:
-        tomldata = tomllib.load(f)
+        return state
+
+    tomldata = tomllib.loads(read_file_str(os.path.join(folder_name, "eprtool.toml")))
 
     excercise, group = tomldata["excercise"], tomldata["group"]
     assert isinstance(excercise, str)
@@ -422,49 +486,73 @@ def _task_pack_feedback_zip(ctx: Context, state: State) -> None:
         root, ext = os.path.splitext(fname)
         return root+suffix+ext
 
-    zip_name = os.path.join(folder_name, os.path.basename(folder_name)+"_annotated.zip")
-    with zipfile.ZipFile(zip_name, "w") as ar:
+    total_files = 0
+    packed_files = 0
+
+    zip_path = os.path.join(folder_name, os.path.basename(folder_name)+"_annotated.zip")
+    with zipfile.ZipFile(zip_path, "w") as ar:
         for subm in tomldata["submissions"].values():
             subm_dir = os.path.join(folder_name, f"{subm["stud-name"]}_{subm["stud-id"]}")
             subm_zip_dir = f"{subm["stud-name"]}_{subm["stud-id"]}_assignsubmission_file"
-            have_code = False
+            have_pdf = False
             for finfo in subm["files"]:
-                if finfo["kind"] == "code":
-                    have_code = True
-                elif finfo["kind"] == "documentation":
-                    ar.write(os.path.join(subm_dir, filename_with_suffix(finfo["custom-name"], state.settings.pdf_annotated_suffix)),
-                        arcname=f"{subm_zip_dir}/Feedback_{excercise}_{subm["stud-name"]}_{finfo["custom-name"]}")
+                if finfo["kind"] == "embed":
+                    have_pdf = True
+                elif finfo["kind"] == "separate":
+                    total_files += 1
+                    file_path = os.path.join(subm_dir, filename_with_suffix(finfo["custom-name"], state.settings.pdf_suffix))
+                    if os.path.isfile(file_path):
+                        ar.write(file_path,
+                            arcname=f"{subm_zip_dir}/Feedback_{excercise}_{subm["stud-name"]}_{finfo["custom-name"].replace("/", "_")}")
+                        packed_files += 1
                 else:
                     assert finfo["kind"] == "ignore"
-            if have_code:
-                    ar.write(os.path.join(subm_dir, filename_with_suffix(f"{subm["stud-name"]}_{subm["stud-id"]}_code.pdf", state.settings.pdf_annotated_suffix)),
-                        arcname=f"{subm_zip_dir}/Feedback_{excercise}_{subm["stud-name"]}_code.pdf")
+            if have_pdf:
+                total_files += 1
+                file_path = os.path.join(subm_dir, filename_with_suffix(f"{subm["stud-name"]}_{subm["stud-id"]}.pdf", state.settings.pdf_suffix))
+                if os.path.isfile(file_path):
+                    ar.write(file_path,
+                        arcname=f"{subm_zip_dir}/Feedback_{excercise}_{subm["stud-name"]}.pdf")
+                    packed_files += 1
+
+    state.info_popup = f"Successfully added feedback ZIP to folder."
+    if packed_files != total_files:
+        state.info_popup += f"\n\nWARNING: Found {total_files-packed_files}/{total_files} unannotated PDFs!"
+    state.info_popup_show_file = zip_path
+
+    return state
 
 def draw_gui(state: State, task_mgr: TaskManager) -> None:
     imgui.begin_disabled(task_mgr.working)
     if imgui.button("Open submission ZIP"):
         task_mgr.enqueue(Task(_task_open_submission_zip, (state,)))
         # TODO: This is a very hacky way of doing the popup
-        imgui.open_popup("Status##TaskProgress")
+        imgui.open_popup("Status")
     imgui.same_line()
     imgui.begin_disabled(state.subms is None)
     if imgui.button("Export to feedback folder"):
         task_mgr.enqueue(Task(_task_export_to_feedback_folder, (state,)))
-        imgui.open_popup("Status##TaskProgress")
+        imgui.open_popup("Status")
     imgui.end_disabled()
     imgui.same_line()
     if imgui.button("Pack feedback ZIP"):
         task_mgr.enqueue(Task(_task_pack_feedback_zip, (state,)))
-        imgui.open_popup("Status##TaskProgress")
+        imgui.open_popup("Status")
     imgui.end_disabled()
 
     if imgui.tree_node("Settings"):
         for k, v in state.settings.__dict__.items():
-            v_changed, v_new = imgui.input_text(k, v)
+            metadata = Settings.__dataclass_fields__[k].metadata
+            label = metadata.get("label", k)
+            hint = metadata.get("hint", "")
+            tooltip = metadata.get("tooltip", "")
+            v_changed, v_new = imgui.input_text_with_hint(label, hint, v)
             if v_changed:
                 state.settings.__dict__[k] = v_new
                 state.settings_last_edited_time = imgui.get_time()
                 state.settings_saved = False
+            if tooltip:
+                imgui.set_item_tooltip(tooltip)
         imgui.push_style_color(Col.TEXT, (1, 1, 1, 0.6))
         imgui.text("(Saved)" if state.settings_saved else "(Waiting)")
         imgui.pop_style_color()
@@ -472,9 +560,8 @@ def draw_gui(state: State, task_mgr: TaskManager) -> None:
         imgui.spacing()
     if not state.settings_saved and imgui.get_time() - state.settings_last_edited_time > 0.5:
         os.makedirs(os.path.dirname(state.settings_path()), exist_ok=True)
-        with open(state.settings_path(), "wb") as f:
-            tomli_w.dump(state.settings.__dict__, f)
-            state.settings_saved = True
+        write_file(state.settings_path(), tomli_w.dumps(state.settings.__dict__))
+        state.settings_saved = True
 
     if state.subms is not None:
         imgui_object_field_input_text("Excercise", state, "excercise", "e.g. Uebung 0")
@@ -521,7 +608,7 @@ def draw_gui(state: State, task_mgr: TaskManager) -> None:
                         imgui.set_keyboard_focus_here(-1)
                     imgui.set_item_tooltip("Empty filename to reset")
                     imgui.same_line()
-                    file_kind_tags: list[SubmissionFileKindTag] = ["code", "documentation", "ignore"]
+                    file_kind_tags: list[SubmissionFileKindTag] = ["embed", "separate", "ignore"]
                     fk_changed, fk = imgui.combo("##Kind", file_kind_tags.index(info.kind), file_kind_tags)
                     if fk_changed:
                         info.kind = file_kind_tags[fk]
@@ -533,14 +620,24 @@ def draw_gui(state: State, task_mgr: TaskManager) -> None:
             imgui.pop_text_wrap_pos()
             imgui.end_child()
 
+    imgui.set_next_window_size((400, 300), Cond.APPEARING)
     imgui.set_next_window_pos(imgui.get_main_viewport().get_center(), Cond.ALWAYS, (0.5, 0.5))
-    if imgui.begin_popup_modal("Error", flags=WindowFlags.ALWAYS_AUTO_RESIZE)[0]:
+    if imgui.begin_popup_modal("Error", flags=WindowFlags.NO_SCROLLBAR)[0]:
+        tb = ""
         if task_mgr.error is not None:
+            tb =  "\n".join(task_mgr.error.formatted_tb)
+            imgui.push_font(font_mono(), 0)
             imgui.push_text_wrap_pos()
             imgui.text(f"Error: {task_mgr.error}")
             imgui.pop_text_wrap_pos()
-            tb = "\n".join(task_mgr.error.formatted_tb)
+            style = imgui.get_style()
+            tbwin_w, tbwin_h = imgui.get_content_region_avail()
+            tbwin_h -= imgui.get_font_size() + 2*style.frame_padding[1]
+            imgui.begin_child("Error Traceback", (tbwin_w, tbwin_h), ChildFlags.NONE, WindowFlags.HORIZONTAL_SCROLLBAR)
             imgui.text(tb)
+            imgui.end_child()
+            imgui.pop_font()
+        imgui_align_button_row(["Close", "Copy to clipboard"], "center")
         if imgui.button("Close", (0, 0)):
             imgui.close_current_popup()
         imgui.same_line()
@@ -548,9 +645,37 @@ def draw_gui(state: State, task_mgr: TaskManager) -> None:
             imgui.set_clipboard_text(f"Error: {task_mgr.error}\n{tb}")
         imgui.end_popup()
 
+    if state.info_popup:
+        imgui.set_next_window_size_constraints((300, 0), (FLT_MAX, FLT_MAX))
+        imgui.set_next_window_pos(imgui.get_main_viewport().get_center(), Cond.ALWAYS, (0.5, 0.5))
+        if imgui.begin_popup_modal("Info", flags=WindowFlags.ALWAYS_AUTO_RESIZE)[0]:
+            imgui.push_text_wrap_pos()
+            imgui.text(state.info_popup)
+            imgui.pop_text_wrap_pos()
+            button_labels = ["Close"]
+            if state.info_popup_show_file:
+                button_labels = ["Show in file manager"]+button_labels
+            if state.info_popup_show_folder:
+                button_labels = ["Open folder"]+button_labels
+            imgui_align_button_row(button_labels, "center")
+            if imgui.button("Close", (0, 0)):
+                state.info_popup = ""
+                state.info_popup_show_file = ""
+                state.info_popup_show_folder = ""
+                imgui.close_current_popup()
+            if state.info_popup_show_file:
+                imgui.same_line()
+                if imgui.button("Show in file manager"):
+                    show_in_file_manager(state.info_popup_show_file)
+            if state.info_popup_show_folder:
+                imgui.same_line()
+                if imgui.button("Open folder"):
+                    show_in_file_manager(state.info_popup_show_folder)
+            imgui.end_popup()
+
     # Handle tasks
     imgui.set_next_window_pos(imgui.get_main_viewport().get_center(), Cond.ALWAYS, (0.5, 0.5))
-    if imgui.begin_popup_modal("Status##TaskProgress", flags=WindowFlags.ALWAYS_AUTO_RESIZE)[0]:
+    if imgui.begin_popup_modal("Status", flags=WindowFlags.ALWAYS_AUTO_RESIZE)[0]:
         imgui.text(task_mgr.status.msg+"...")
         if task_mgr.status.progress == "infinite":
             imgui.progress_bar(imgui.get_time() * -0.5)
@@ -570,6 +695,9 @@ def draw_gui(state: State, task_mgr: TaskManager) -> None:
                 # Copy all fields to state (deepcopy not necessary since data was pickled)
                 for k, f in v.__dict__.items():
                     state.__dict__[k] = f
+
+                if v.info_popup:
+                    imgui.open_popup("Info")
             elif v is None:
                 pass
             elif isinstance(v, TaskException):
@@ -611,12 +739,11 @@ def main():
 
     state = State(platformdirs.PlatformDirs("eprtool"))
     try:
-        with open(state.settings_path(), "rb") as f:
-            settings = tomllib.load(f)
-            for k in state.settings.__dict__:
-                if k not in settings:
-                    continue
-                state.settings.__dict__[k] = settings[k]
+        settings = tomllib.loads(read_file_str(state.settings_path()))
+        for k in state.settings.__dict__:
+            if k not in settings:
+                continue
+            state.settings.__dict__[k] = settings[k]
     except FileNotFoundError:
         pass
 

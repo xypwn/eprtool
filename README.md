@@ -16,19 +16,19 @@ uvx --from git+https://github.com/xypwn/eprtool eprtool
 ## Usage
 #### 0. Configure settings
 In "Settings":
-- Set "tutor" to the title of your tutoring group(s) (e.g. "EPR 01/02 - Firstname")
-- Set "pdf_annnotated_suffix" to the suffix your PDF annotator adds to annotated filenames (e.g. for xournalpp, `_kommentiert` in German, `_annotated` in English etc.)
+- Set "Tutor" to the title of your tutoring group(s) (e.g. "EPR 01/02 - Firstname")
+- Set "PDF suffix" to the suffix your PDF annotator adds to annotated filenames (e.g. for xournalpp, `_kommentiert` in German, `_annotated` in English etc.)
 
 #### 1. Open submission ZIP
 Use the "Open submission ZIP" button to select a ZIP file downloaded from moodle via "Download all submissions".
 #### 2. Ensure excercise and group are correct
 The tool should guess excercise and group correctly from the title, but if it didn't manage to guess or guessed incorrectly, you can adjust them in the respective text boxes.
 #### 3. Organize files
-You will see all submissions in the left. Go through all of them and make sure all files are in the right order (drag to rearrange), have the right name and tag (double-click to edit).
+You will see all submissions in the left. Go through all of them and make sure all embedded files are in the right order (drag to rearrange) and have the right name and tag (double-click to edit).
 
 Available tags are:
-- `code`: all combined into `code.pdf` in listing order (use this for program code or Markdown documentation)
-- `documentation`: each documentation file is copied verbatim (use this for PDF documentation)
+- `embed`: all combined into `{student-name}_{student-id}.pdf` in listing order (use this for program code, images or Markdown documentation)
+- `separate`: each file is copied verbatim (use this for PDF documentation)
 - `ignore`: completely ignored
 
 #### 5. Export to feedback folder
