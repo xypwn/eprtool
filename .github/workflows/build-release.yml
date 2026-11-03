@@ -24,7 +24,8 @@ jobs:
           src/eprtool/__init__.py `
           --onefile --windowed `
           --copy-metadata slimgui `
-          --collect-all glfw --collect-all OpenGL
+          --collect-all glfw --collect-all OpenGL `
+          --add-data src/eprtool/res/:eprtool/res/ --hiddenimport eprtool
     - name: Rename executable
       run: mv dist/__init__.exe eprtool.exe
     - name: Upload executable
@@ -50,7 +51,8 @@ jobs:
           src/eprtool/__init__.py \
           --onefile --windowed \
           --copy-metadata slimgui \
-          --collect-all glfw --collect-all OpenGL
+          --collect-all glfw --collect-all OpenGL \
+          --add-data src/eprtool/res/:eprtool/res/ --hiddenimport eprtool
     - name: Rename executable
       run: mv dist/__init__ eprtool
     - name: Create archive

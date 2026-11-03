@@ -1,3 +1,5 @@
+import pkgutil
+import time
 import traceback
 import sys
 from dataclasses import dataclass
@@ -72,6 +74,12 @@ TYPST_PRELUDE = """
 })
 #v(1em)
 """
+
+_imgui_font_mono: imgui.Font|None = None
+
+def font_mono() -> imgui.Font:
+    assert _imgui_font_mono is not None
+    return _imgui_font_mono
 
 def imgui_is_item_double_clicked(mouse_button: MouseButton = MouseButton.LEFT) -> bool:
     return imgui.is_item_clicked(mouse_button) and imgui.is_mouse_double_clicked(mouse_button)
@@ -291,6 +299,8 @@ def _task_open_submission_zip(ctx: Context, state: State) -> State:
     #fname = filedialog.askopenfilename(filetypes=(("ZIP Archive", "*.zip"),), title="Open submission archive")
     fname = crossfiledialog.open_file("Open submission archive",
         state.dirs.user_downloads_dir, "*.zip")
+    if fname == "" or fname is None:
+        return state
 
     # Guess excercise title and group
     m = RE_GUESS_EXCERCISE_GROUP.match(os.path.basename(fname))
@@ -298,32 +308,31 @@ def _task_open_submission_zip(ctx: Context, state: State) -> State:
         state.excercise = f"Uebung {m["ex"]}"
         state.group = f"EPR{m["gr"]}"
 
-    if fname != "":
-        state.subms = submission_files_from_zip(fname)
-        state.subm_files_ordered = []
-        for i, subm in enumerate(state.subms):
-            state.subm_files_ordered.append([])
-            for fname in sorted(subm.files.keys()):
-                state.subm_files_ordered[i].append(SubmissionFileInfo(
-                    fname,
-                    fname,
-                    "code" if fname.lower().endswith(".py") else "documentation",
-                    ))
-        # If all filenames in a submission share a common first path element,
-        # strip that by default.
-        for i, _ in enumerate(state.subms):
-            strip_first_elem = True
-            ordered_finfos = state.subm_files_ordered[i]
-            if len(ordered_finfos):
-                common_first_elem = ordered_finfos[0].custom_filename.split("/")[0]
-                for finfo in ordered_finfos:
-                    elems = finfo.custom_filename.split("/")
-                    if len(elems) < 2 or elems[0] != common_first_elem:
-                        strip_first_elem = False
-                        break
-            if strip_first_elem:
-                for finfo in ordered_finfos:
-                    finfo.custom_filename = "/".join(finfo.custom_filename.split("/")[1:])
+    state.subms = submission_files_from_zip(fname)
+    state.subm_files_ordered = []
+    for i, subm in enumerate(state.subms):
+        state.subm_files_ordered.append([])
+        for fname in sorted(subm.files.keys()):
+            state.subm_files_ordered[i].append(SubmissionFileInfo(
+                fname,
+                fname,
+                "code" if fname.lower().endswith(".py") else "documentation",
+                ))
+    # If all filenames in a submission share a common first path element,
+    # strip that by default.
+    for i, _ in enumerate(state.subms):
+        strip_first_elem = True
+        ordered_finfos = state.subm_files_ordered[i]
+        if len(ordered_finfos):
+            common_first_elem = ordered_finfos[0].custom_filename.split("/")[0]
+            for finfo in ordered_finfos:
+                elems = finfo.custom_filename.split("/")
+                if len(elems) < 2 or elems[0] != common_first_elem:
+                    strip_first_elem = False
+                    break
+        if strip_first_elem:
+            for finfo in ordered_finfos:
+                finfo.custom_filename = "/".join(finfo.custom_filename.split("/")[1:])
     return state
 
 RE_VALID_EXCERCISE_TITLE = re.compile(r"^[\w\-. ]+$")
@@ -335,7 +344,7 @@ def _task_export_to_feedback_folder(ctx: Context, state: State) -> State:
     ctx.msgq.put(Status("choosing destination"))
     folder_name = crossfiledialog.choose_folder("Choose output folder",
         os.path.dirname(state.last_exported_folder) if state.last_exported_folder != "" else None)
-    if folder_name == "":
+    if folder_name == "" or folder_name is None:
         return state
     tomldata = {
         "excercise": state.excercise,
@@ -400,7 +409,7 @@ def _task_pack_feedback_zip(ctx: Context, state: State) -> None:
     ctx.msgq.put(Status("choosing feedback folder"))
     folder_name = crossfiledialog.choose_folder("Choose feedback folder",
         state.last_exported_folder if state.last_exported_folder != "" else None)
-    if folder_name == "":
+    if folder_name == "" or folder_name is None:
         return
     with open(os.path.join(folder_name, "eprtool.toml"), "rb") as f:
         tomldata = tomllib.load(f)
@@ -582,12 +591,23 @@ def main():
     glfw_window = glfw.create_window(width=600, height=600, title="EPR Tool", monitor=None, share=None)
     glfw.make_context_current(glfw_window)
 
-    # TODO: Limit frame rate
+    # Frame limiting
+    TARGET_FRAME_RATE: float = 60.0
+    last_draw_timestamp: float = time.time()
 
     imgui.create_context()
     io = imgui.get_io()
     io.config_flags |= imgui.ConfigFlags.NAV_ENABLE_KEYBOARD
     renderer = GlfwRenderer(glfw_window)
+    
+    # Load fonts
+    fontdata = pkgutil.get_data("eprtool", "res/DejaVuSans.ttf")
+    assert fontdata is not None
+    io.fonts.add_font_from_memory_ttf(fontdata)
+    fontdata = pkgutil.get_data("eprtool", "res/DejaVuSansMono.ttf")
+    global _imgui_font_mono
+    assert fontdata is not None
+    _imgui_font_mono = io.fonts.add_font_from_memory_ttf(fontdata)
 
     state = State(platformdirs.PlatformDirs("eprtool"))
     try:
@@ -602,7 +622,22 @@ def main():
 
     task_mgr = TaskManager()
 
-    while not glfw.window_should_close(glfw_window):
+    DEBUG_FPS = False
+    if DEBUG_FPS:
+        fps_cnt = 0
+        fps_time = time.time()
+
+    def draw():
+        if DEBUG_FPS:
+            nonlocal fps_cnt
+            nonlocal fps_time
+            fps_cnt += 1
+            now = time.time()
+            if now - fps_time >= 1:
+                print(f"fps: {fps_cnt/(now - fps_time)}")
+                fps_cnt = 0
+                fps_time = now
+
         glfw.poll_events()
         gl.glClear(int(gl.GL_COLOR_BUFFER_BIT)|int(gl.GL_DEPTH_BUFFER_BIT))
         renderer.new_frame()
@@ -623,6 +658,22 @@ def main():
         imgui.render()
         renderer.render(imgui.get_draw_data())
         glfw.swap_buffers(glfw_window)
+
+    while not glfw.window_should_close(glfw_window):
+        now = time.time()
+        time_to_draw = now - last_draw_timestamp
+        num_frames_to_draw = time_to_draw * TARGET_FRAME_RATE
+        if time_to_draw < 0:
+            print(f"skipped {-num_frames_to_draw} frames due to over-draw")
+            last_draw_timestamp = now
+        elif time_to_draw >= 1:
+            print(f"dropped {num_frames_to_draw} frames due to under-draw")
+            last_draw_timestamp = now
+        elif num_frames_to_draw >= 1:
+            draw()
+            last_draw_timestamp += 1.0/TARGET_FRAME_RATE
+        else:
+            time.sleep(time_to_draw)
 
     task_mgr.shutdown()
     renderer.shutdown()

@@ -22,3 +22,7 @@ build-backend = "uv_build"
 
 [project.gui-scripts]
 eprtool = "eprtool:main"
+
+# eprtool-dev is inside "scripts" to not suppress CLI output on Windows.
+[project.scripts]
+eprtool-dev = "eprtool:main"

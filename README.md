@@ -2,13 +2,13 @@
 
 
 ## Running
-### Download (standalone executables)
+### Via direct download (standalone executable)
 - [Windows EXE (64-bit)](https://github.com/xypwn/eprtool/releases/latest/download/eprtool.exe)
 - [Linux executable (64-bit, archived)](https://github.com/xypwn/eprtool/releases/latest/download/eprtool-linux.tar.xz)
 
 Note that the executables quite big, since they include [typst](https://github.com/typst/typst) for PDF generation, as well as other large libraries.
 
-### uvx
+### Via uvx (requires uv)
 ```sh
 uvx --from git+https://github.com/xypwn/eprtool eprtool
 ```
@@ -43,3 +43,16 @@ Make sure your settings are set correctly for your chosen PDF annotator and lang
 
 #### 7. Repack ZIP
 Once every PDF has been annotated, click "Pack feedback ZIP". Select the feedback folder. A .zip file will appear inside, which can be uploaded to Moodle via "Upload feedback files as ZIP".
+
+## Status
+This software is _currently_ unstable af. Setting and submission file/folder cross-version compatibility is NOT guaranteed.
+
+To reset the settings, delete:
+- Windows: `%localappdata%/eprtool/eprtool/settings.toml`
+- Linux: `~/.config/eprtool/settings.toml`
+
+## Hacking
+- Clone the repo (`git clone https://github.com/xypwn/eprtool; cd eprtool`)
+- Python source code is in `src/eprtool`
+- Fetch dependencies: `uv sync`
+- Run: `uv run eprtool-dev`
