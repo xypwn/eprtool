@@ -1,3 +1,4 @@
+from pathlib import Path
 import pkgutil
 import time
 import traceback
@@ -20,13 +21,9 @@ import unicodedata
 import zipfile
 import tkinter.filedialog as filedialog
 
-from slimgui import imgui
-from slimgui.imgui import StyleVar, WindowFlags, DragDropFlags, MouseButton, ItemFlags, Cond, Col, FLT_MAX, ChildFlags
-from slimgui.integrations.glfw import GlfwRenderer
-import OpenGL.GL as gl
+from imgui_bundle import imgui, immapp, portable_file_dialogs, hello_imgui, rich_md
 import chardet
 import crossfiledialog
-import glfw
 import typst
 import tomllib
 import tomli_w
@@ -76,32 +73,34 @@ TYPST_PRELUDE = """
 #v(1em)
 """
 
-def write_file(path: str, data: bytes|str) -> None:
-    dir = os.path.dirname(path)
-    if dir:
-        os.makedirs(dir, exist_ok=True)
+def write_file(path: str|Path, data: bytes|str) -> None:
+    path = Path(path)
+    os.makedirs(path.parent, exist_ok=True)
     if isinstance(data, bytes):
         with open(path, "wb") as f: f.write(data)
     else:
         with open(path, "w") as f: f.write(data)
 
-def read_file_bytes(path: str) -> bytes:
+def read_file_bytes(path: str|Path) -> bytes:
     with open(path, "rb") as f:
         return f.read()
 
-def read_file_str(path: str) -> str:
+def read_file_str(path: str|Path) -> str:
     with open(path, "r") as f:
         return f.read()
 
-_imgui_font_mono: imgui.Font|None = None
-def font_mono() -> imgui.Font:
-    assert _imgui_font_mono is not None
-    return _imgui_font_mono
+def get_res_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(getattr(sys, "_MEIPASS"))/"eprtool"/"res"
+    else:
+        return Path(__file__).parent/"res"
 
-def imgui_is_item_double_clicked(mouse_button: MouseButton = MouseButton.LEFT) -> bool:
+_imgui_font_mono: imgui.ImFont|None = None
+
+def imgui_is_item_double_clicked(mouse_button: imgui.MouseButton = imgui.MouseButton_.left) -> bool:
     return imgui.is_item_clicked(mouse_button) and imgui.is_mouse_double_clicked(mouse_button)
 
-def imgui_object_field_input_text(label: str, obj: object, obj_field: str, hint: str = "", flags: imgui.InputTextFlags = imgui.InputTextFlags.NONE) -> bool:
+def imgui_object_field_input_text(label: str, obj: object, obj_field: str, hint: str = "", flags: imgui.InputTextFlags = imgui.InputTextFlags_.none) -> bool:
     s = obj.__dict__[obj_field]
     changed, s_new = imgui.input_text_with_hint(label, hint, s, flags)
     if changed:
@@ -247,6 +246,8 @@ class Settings:
 class State:
     dirs: platformdirs.PlatformDirsABC
 
+    rebuild_dock_layout = True
+
     subms: list[SubmissionArchive]|None = None
     subm_idx: int = 0
     subm_files_ordered: list[list[SubmissionFileInfo]] = default_field([])
@@ -265,6 +266,8 @@ class State:
     settings: Settings = default_field(Settings())
     settings_saved: bool = True
     settings_last_edited_time: float = 0
+
+    help_markdown: str = "# Help"
 
     def settings_path(self) -> str:
         return os.path.join(self.dirs.user_config_dir, "settings.toml")
@@ -391,10 +394,12 @@ def _task_open_submission_zip(ctx: Context, state: State) -> State:
             for finfo in ordered_finfos:
                 finfo.custom_filename = "/".join(finfo.custom_filename.split("/")[1:])
 
+    def filename_list_md(names: list[str]) -> str:
+        return "``` "+"\n".join(names)+" ```"
     if submission_files.skipped_files:
-        state.info_popup += f"- Skipped {len(submission_files.skipped_files)} files in the submission archive that didn't look like submissions: {submission_files.skipped_files}\n"
+        state.info_popup += f"- Skipped {len(submission_files.skipped_files)} files in the submission archive that didn't look like submissions: {filename_list_md(submission_files.skipped_files)}\n"
     if submission_files.unrecognized_files:
-        state.info_popup += f"- Failed to recognize type of {len(submission_files.unrecognized_files)} submitted files: {submission_files.unrecognized_files}\n"
+        state.info_popup += f"- Failed to recognize type of {len(submission_files.unrecognized_files)} submitted files: {filename_list_md(submission_files.unrecognized_files)}\n"
 
     return state
 
@@ -406,7 +411,7 @@ def _task_export_to_feedback_folder(ctx: Context, state: State) -> State:
     assert state.subms is not None
     ctx.msgq.put(Status("choosing destination"))
     folder_name = crossfiledialog.choose_folder("Choose output folder",
-        os.path.dirname(state.last_exported_folder) if state.last_exported_folder != "" else None)
+        os.path.dirname(state.last_exported_folder) if state.last_exported_folder != "" else None)  # ty: ignore[invalid-argument-type]
     if folder_name == "" or folder_name is None:
         return state
     tomldata = {
@@ -472,7 +477,7 @@ def _task_export_to_feedback_folder(ctx: Context, state: State) -> State:
 def _task_pack_feedback_zip(ctx: Context, state: State) -> State:
     ctx.msgq.put(Status("choosing feedback folder"))
     folder_name = crossfiledialog.choose_folder("Choose feedback folder",
-        state.last_exported_folder if state.last_exported_folder != "" else None)
+        state.last_exported_folder if state.last_exported_folder != "" else None)  # ty: ignore[invalid-argument-type]
     if folder_name == "" or folder_name is None:
         return state
 
@@ -515,9 +520,10 @@ def _task_pack_feedback_zip(ctx: Context, state: State) -> State:
                         arcname=f"{subm_zip_dir}/Feedback_{excercise}_{subm["stud-name"]}.pdf")
                     packed_files += 1
 
-    state.info_popup = f"Successfully added feedback ZIP to folder."
+    state.info_popup = ""
     if packed_files != total_files:
-        state.info_popup += f"\n\nWARNING: Found {total_files-packed_files}/{total_files} unannotated PDFs!"
+        state.info_popup += f"> [!WARNING]\n> Found {total_files-packed_files}/{total_files} unannotated PDFs!\n\n"
+    state.info_popup += f"Successfully added feedback ZIP to folder."
     state.info_popup_show_file = zip_path
 
     return state
@@ -539,6 +545,10 @@ def draw_gui(state: State, task_mgr: TaskManager) -> None:
         task_mgr.enqueue(Task(_task_pack_feedback_zip, (state,)))
         imgui.open_popup("Status")
     imgui.end_disabled()
+    imgui.same_line()
+    if imgui.button("?"):
+        imgui.open_popup("Help")
+    imgui.set_item_tooltip("Help")
 
     if imgui.tree_node("Settings"):
         for k, v in state.settings.__dict__.items():
@@ -553,7 +563,7 @@ def draw_gui(state: State, task_mgr: TaskManager) -> None:
                 state.settings_saved = False
             if tooltip:
                 imgui.set_item_tooltip(tooltip)
-        imgui.push_style_color(Col.TEXT, (1, 1, 1, 0.6))
+        imgui.push_style_color(imgui.Col_.text, (1, 1, 1, 0.6))
         imgui.text("(Saved)" if state.settings_saved else "(Waiting)")
         imgui.pop_style_color()
         imgui.tree_pop()
@@ -564,25 +574,34 @@ def draw_gui(state: State, task_mgr: TaskManager) -> None:
         state.settings_saved = True
 
     if state.subms is not None:
+        dock_id = imgui.get_id("MainDock")
+        if state.rebuild_dock_layout:
+            imgui.internal.dock_builder_add_node(dock_id)
+            sp = imgui.internal.dock_builder_split_node(dock_id, imgui.Dir.left, 0.4)
+            imgui.internal.dock_builder_dock_window("Submissions", sp.id_at_dir)
+            imgui.internal.dock_builder_dock_window("Contents", sp.id_at_opposite_dir)
+            imgui.internal.dock_builder_finish(dock_id)
+            state.rebuild_dock_layout = False
+        imgui.dock_space(dock_id)
+
         imgui_object_field_input_text("Excercise", state, "excercise", "e.g. Uebung 0")
         imgui_object_field_input_text("Group", state, "group", "e.g. EPR01")
-        imgui.begin_child("submissions", (150, 0), imgui.ChildFlags.BORDERS|imgui.ChildFlags.RESIZE_X)
+        imgui.begin("Submissions")
         imgui.separator_text(f"{len(state.subms)} submissions")
         for i, s in enumerate(state.subms):
-            if imgui.selectable(f"{s.stud_name} ({s.stud_id})", i == state.subm_idx, imgui.SelectableFlags.SELECT_ON_NAV)[0]:
+            if imgui.selectable(f"{s.stud_name} ({s.stud_id})", i == state.subm_idx, imgui.SelectableFlags_.select_on_nav)[0]:
                 state.subm_idx = i
                 state.editing_file_info_idx = None
-        imgui.end_child()
-        imgui.same_line()
+        imgui.end()
+        imgui.begin("Contents")
         if state.subm_idx < len(state.subms):
             subm = state.subms[state.subm_idx]
             ordered_finfos = state.subm_files_ordered[state.subm_idx]
-            imgui.begin_child("contents", (0, 0), imgui.ChildFlags.BORDERS)
             imgui.push_text_wrap_pos()
             imgui.text(f"Submitter: {subm.stud_name} ({s.stud_id})")
             imgui.text(f"Submission filename: {"/".join(subm.filename.split("/")[1:])}")
             imgui.separator_text("Files")
-            imgui.push_item_flag(ItemFlags.ALLOW_DUPLICATE_ID, True)
+            imgui.push_item_flag(imgui.ItemFlags_.allow_duplicate_id, True)
             for i, info in enumerate(ordered_finfos):
                 if state.editing_file_info_idx != i:
                     imgui.selectable(f"{info.custom_filename} [{info.kind}]", False)
@@ -593,7 +612,7 @@ def draw_gui(state: State, task_mgr: TaskManager) -> None:
                     # Hacky-ass dragging code pulled from dearimgui demo. Might break
                     # when dragging too quickly, but it seems to work well enough.
                     if imgui.is_item_active() and not imgui.is_item_hovered():
-                        i_next = i + (-1 if imgui.get_mouse_drag_delta(MouseButton.LEFT)[1] < 0.0 else 1)
+                        i_next = i + (-1 if imgui.get_mouse_drag_delta(imgui.MouseButton_.left)[1] < 0.0 else 1)
                         if 0 <= i_next < len(ordered_finfos):
                             ordered_finfos[i], ordered_finfos[i_next] = \
                                 ordered_finfos[i_next], ordered_finfos[i]
@@ -608,74 +627,81 @@ def draw_gui(state: State, task_mgr: TaskManager) -> None:
                         imgui.set_keyboard_focus_here(-1)
                     imgui.set_item_tooltip("Empty filename to reset")
                     imgui.same_line()
-                    file_kind_tags: list[SubmissionFileKindTag] = ["embed", "separate", "ignore"]
+                    file_kind_tags: list[str] = ["embed", "separate", "ignore"]
                     fk_changed, fk = imgui.combo("##Kind", file_kind_tags.index(info.kind), file_kind_tags)
                     if fk_changed:
-                        info.kind = file_kind_tags[fk]
+                        info.kind = file_kind_tags[fk]  # ty: ignore[invalid-assignment]
                     any_active = any_active or imgui.is_item_active()
                     if not state.focus_editing_file_info and not any_active and imgui.is_window_focused():
                         state.editing_file_info_idx = None
                     state.focus_editing_file_info = False
             imgui.pop_item_flag()
             imgui.pop_text_wrap_pos()
-            imgui.end_child()
+        imgui.end()
 
-    imgui.set_next_window_size((400, 300), Cond.APPEARING)
-    imgui.set_next_window_pos(imgui.get_main_viewport().get_center(), Cond.ALWAYS, (0.5, 0.5))
-    if imgui.begin_popup_modal("Error", flags=WindowFlags.NO_SCROLLBAR)[0]:
-        tb = ""
+    def avail_size_without_button_row() -> tuple[float, float]:
+        style = imgui.get_style()
+        cw, ch = imgui.get_content_region_avail()
+        ch -= imgui.get_font_size() + 2*style.frame_padding[1]
+        return cw, ch
+
+    def begin_modal_box(name: str, initial_size: tuple[float, float]|None = None) -> bool:
+        initial_size = initial_size or (400, 300)
+        style = imgui.get_style()
+        imgui.set_next_window_size(initial_size, imgui.Cond_.appearing)
+        imgui.set_next_window_pos(imgui.get_main_viewport().get_center(), imgui.Cond_.always, (0.5, 0.5))
+        imgui.set_next_window_size_constraints((75, 75), (imgui.FLT_MAX, imgui.FLT_MAX))
+        if not imgui.begin_popup_modal(name, flags=imgui.WindowFlags_.no_scrollbar)[0]:
+            return False
+        imgui.begin_child("##Content", avail_size_without_button_row())
+        return True
+    def end_modal_box(extra_button_labels: list[str]|None = None) -> typing.Literal["", "Close"]|str:
+        imgui.end_child()
+        labels = ["Close"] + (extra_button_labels or [])
+        imgui_align_button_row(labels, "center")
+        pressed = ""
+        for i, label in enumerate(labels):
+            if i != 0:
+                imgui.same_line()
+            if imgui.button(label):
+                pressed = label
+        if pressed == "Close":
+            imgui.close_current_popup()
+        imgui.end_popup()
+        return pressed
+
+    if begin_modal_box("Help"):
+        rich_md.render(state.help_markdown)
+        end_modal_box()
+
+    if begin_modal_box("Error"):
         if task_mgr.error is not None:
             tb =  "\n".join(task_mgr.error.formatted_tb)
-            imgui.push_font(font_mono(), 0)
-            imgui.push_text_wrap_pos()
-            imgui.text(f"Error: {task_mgr.error}")
-            imgui.pop_text_wrap_pos()
-            style = imgui.get_style()
-            tbwin_w, tbwin_h = imgui.get_content_region_avail()
-            tbwin_h -= imgui.get_font_size() + 2*style.frame_padding[1]
-            imgui.begin_child("Error Traceback", (tbwin_w, tbwin_h), ChildFlags.NONE, WindowFlags.HORIZONTAL_SCROLLBAR)
-            imgui.text(tb)
-            imgui.end_child()
-            imgui.pop_font()
-        imgui_align_button_row(["Close", "Copy to clipboard"], "center")
-        if imgui.button("Close", (0, 0)):
-            imgui.close_current_popup()
-        imgui.same_line()
-        if imgui.button("Copy to clipboard", (0, 0)):
-            imgui.set_clipboard_text(f"Error: {task_mgr.error}\n{tb}")
-        imgui.end_popup()
+            rich_md.render(f"Error: `{task_mgr.error}`")
+            rich_md.render(f"``` {tb} ```")
+        end_modal_box()
 
     if state.info_popup:
-        imgui.set_next_window_size_constraints((300, 0), (FLT_MAX, FLT_MAX))
-        imgui.set_next_window_pos(imgui.get_main_viewport().get_center(), Cond.ALWAYS, (0.5, 0.5))
-        if imgui.begin_popup_modal("Info", flags=WindowFlags.ALWAYS_AUTO_RESIZE)[0]:
-            imgui.push_text_wrap_pos()
-            imgui.text(state.info_popup)
-            imgui.pop_text_wrap_pos()
-            button_labels = ["Close"]
+        if begin_modal_box("Info"):
+            rich_md.render(state.info_popup)
+            button_labels = []
             if state.info_popup_show_file:
-                button_labels = ["Show in file manager"]+button_labels
+                button_labels.append("Show in file manager")
             if state.info_popup_show_folder:
-                button_labels = ["Open folder"]+button_labels
-            imgui_align_button_row(button_labels, "center")
-            if imgui.button("Close", (0, 0)):
-                state.info_popup = ""
-                state.info_popup_show_file = ""
-                state.info_popup_show_folder = ""
-                imgui.close_current_popup()
-            if state.info_popup_show_file:
-                imgui.same_line()
-                if imgui.button("Show in file manager"):
+                button_labels.append("Open folder")
+            match end_modal_box(button_labels):
+                case "Show in file manager":
                     show_in_file_manager(state.info_popup_show_file)
-            if state.info_popup_show_folder:
-                imgui.same_line()
-                if imgui.button("Open folder"):
+                case "Open folder":
                     show_in_file_manager(state.info_popup_show_folder)
-            imgui.end_popup()
+                case "Close":
+                    state.info_popup = ""
+                    state.info_popup_show_file = ""
+                    state.info_popup_show_folder = ""
 
     # Handle tasks
-    imgui.set_next_window_pos(imgui.get_main_viewport().get_center(), Cond.ALWAYS, (0.5, 0.5))
-    if imgui.begin_popup_modal("Status", flags=WindowFlags.ALWAYS_AUTO_RESIZE)[0]:
+    imgui.set_next_window_pos(imgui.get_main_viewport().get_center(), imgui.Cond_.always, (0.5, 0.5))
+    if imgui.begin_popup_modal("Status", flags=imgui.WindowFlags_.always_auto_resize)[0]:
         imgui.text(task_mgr.status.msg+"...")
         if task_mgr.status.progress == "infinite":
             imgui.progress_bar(imgui.get_time() * -0.5)
@@ -710,34 +736,9 @@ def draw_gui(state: State, task_mgr: TaskManager) -> None:
             pass
 
 def main():
-    glfw.init()
-    glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 3)
-    glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 3)
-    glfw.window_hint(glfw.OPENGL_FORWARD_COMPAT, glfw.TRUE)
-    glfw.window_hint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE)
-    glfw.window_hint(glfw.VISIBLE, True)
-    glfw_window = glfw.create_window(width=600, height=600, title="EPR Tool", monitor=None, share=None)
-    glfw.make_context_current(glfw_window)
-
-    # Frame limiting
-    TARGET_FRAME_RATE: float = 60.0
-    last_draw_timestamp: float = time.time()
-
-    imgui.create_context()
-    io = imgui.get_io()
-    io.config_flags |= imgui.ConfigFlags.NAV_ENABLE_KEYBOARD
-    renderer = GlfwRenderer(glfw_window)
-    
-    # Load fonts
-    fontdata = pkgutil.get_data("eprtool", "res/DejaVuSans.ttf")
-    assert fontdata is not None
-    io.fonts.add_font_from_memory_ttf(fontdata)
-    fontdata = pkgutil.get_data("eprtool", "res/DejaVuSansMono.ttf")
-    global _imgui_font_mono
-    assert fontdata is not None
-    _imgui_font_mono = io.fonts.add_font_from_memory_ttf(fontdata)
-
-    state = State(platformdirs.PlatformDirs("eprtool"))
+    state = State(
+        platformdirs.PlatformDirs("eprtool"),
+        help_markdown=read_file_str(str(get_res_dir()/"HELP.md")))
     try:
         settings = tomllib.loads(read_file_str(state.settings_path()))
         for k in state.settings.__dict__:
@@ -765,46 +766,27 @@ def main():
                 fps_cnt = 0
                 fps_time = now
 
-        glfw.poll_events()
-        gl.glClear(int(gl.GL_COLOR_BUFFER_BIT)|int(gl.GL_DEPTH_BUFFER_BIT))
-        renderer.new_frame()
-        imgui.new_frame()
-
-        viewport = imgui.get_main_viewport()
-        imgui.push_style_var(StyleVar.WINDOW_PADDING, (5, 5))
-        imgui.set_next_window_pos(viewport.pos)
-        imgui.set_next_window_size(viewport.size)
-        imgui.begin("##MainWindow", flags=
-            WindowFlags.NO_TITLE_BAR|WindowFlags.NO_COLLAPSE|
-            WindowFlags.NO_RESIZE|WindowFlags.NO_MOVE|
-            WindowFlags.NO_BRING_TO_FRONT_ON_FOCUS|WindowFlags.NO_NAV)
-        imgui.pop_style_var()
         draw_gui(state, task_mgr)
-        imgui.end()
 
-        imgui.render()
-        renderer.render(imgui.get_draw_data())
-        glfw.swap_buffers(glfw_window)
+    def load_fonts():
+        fonts = imgui.get_io().fonts
+        fonts.add_font_from_file_ttf(str(get_res_dir()/"DejaVuSans.ttf"), 15)
+        _font_mono = fonts.add_font_from_file_ttf(str(get_res_dir()/"DejaVuSansMono.ttf"), 15)
 
-    while not glfw.window_should_close(glfw_window):
-        now = time.time()
-        time_to_draw = now - last_draw_timestamp
-        num_frames_to_draw = time_to_draw * TARGET_FRAME_RATE
-        if time_to_draw < 0:
-            print(f"skipped {-num_frames_to_draw} frames due to over-draw")
-            last_draw_timestamp = now
-        elif time_to_draw >= 1:
-            print(f"dropped {num_frames_to_draw} frames due to under-draw")
-            last_draw_timestamp = now
-        elif num_frames_to_draw >= 1:
-            draw()
-            last_draw_timestamp += 1.0/TARGET_FRAME_RATE
-        else:
-            time.sleep(time_to_draw)
+    rp = hello_imgui.RunnerParams()
+    rp.imgui_window_params.enable_viewports = True
+    rp.app_window_params.window_title = "EPR Tool"
+    rp.callbacks.show_gui = draw
+    rp.callbacks.load_additional_fonts = load_fonts
+    rp.fps_idling = hello_imgui.FpsIdling(5)
+    rp.ini_disable = True
+    ap = immapp.AddOnsParams()
+    md_opts = rich_md.MarkdownOptions()
+    ap.with_markdown = True
+    ap.with_markdown_options = md_opts
+    immapp.run(rp, ap)
 
     task_mgr.shutdown()
-    renderer.shutdown()
-    imgui.destroy_context(None)
 
 if __name__ == "__main__":
     mp.freeze_support()

@@ -2,3 +2,6 @@
 /imgui.ini
 /uv.lock
 __pycache__
+__init__.spec
+/build
+/dist
