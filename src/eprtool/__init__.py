@@ -574,6 +574,9 @@ def draw_gui(state: State, task_mgr: TaskManager) -> None:
         state.settings_saved = True
 
     if state.subms is not None:
+        imgui_object_field_input_text("Excercise", state, "excercise", "e.g. Uebung 0")
+        imgui_object_field_input_text("Group", state, "group", "e.g. EPR01")
+
         dock_id = imgui.get_id("MainDock")
         if state.rebuild_dock_layout:
             imgui.internal.dock_builder_add_node(dock_id)
@@ -584,8 +587,6 @@ def draw_gui(state: State, task_mgr: TaskManager) -> None:
             state.rebuild_dock_layout = False
         imgui.dock_space(dock_id)
 
-        imgui_object_field_input_text("Excercise", state, "excercise", "e.g. Uebung 0")
-        imgui_object_field_input_text("Group", state, "group", "e.g. EPR01")
         imgui.begin("Submissions")
         imgui.separator_text(f"{len(state.subms)} submissions")
         for i, s in enumerate(state.subms):
@@ -670,7 +671,7 @@ def draw_gui(state: State, task_mgr: TaskManager) -> None:
         imgui.end_popup()
         return pressed
 
-    if begin_modal_box("Help"):
+    if begin_modal_box("Help", (600, 500)):
         rich_md.render(state.help_markdown)
         end_modal_box()
 
@@ -773,11 +774,17 @@ def main():
         fonts.add_font_from_file_ttf(str(get_res_dir()/"DejaVuSans.ttf"), 15)
         _font_mono = fonts.add_font_from_file_ttf(str(get_res_dir()/"DejaVuSansMono.ttf"), 15)
 
+    def post_init_ig():
+        io = imgui.get_io()
+        io.config_flags |= imgui.ConfigFlags_.nav_enable_keyboard
+        io.config_flags |= imgui.ConfigFlags_.nav_enable_gamepad
+
     rp = hello_imgui.RunnerParams()
     rp.imgui_window_params.enable_viewports = True
     rp.app_window_params.window_title = "EPR Tool"
     rp.callbacks.show_gui = draw
     rp.callbacks.load_additional_fonts = load_fonts
+    rp.callbacks.post_init = post_init_ig
     rp.fps_idling = hello_imgui.FpsIdling(5)
     rp.ini_disable = True
     ap = immapp.AddOnsParams()
