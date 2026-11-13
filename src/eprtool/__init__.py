@@ -1,33 +1,34 @@
-from pathlib import Path
-import pkgutil
-import time
-import traceback
-import sys
-from dataclasses import dataclass, field
 import copy
 import ctypes
 import dataclasses
 import io
 import multiprocessing as mp
+import multiprocessing.pool as mpp
 import multiprocessing.queues as mpq
 import multiprocessing.sharedctypes as mpsct
-import multiprocessing.pool as mpp
 import os
+import pkgutil
 import queue
 import re
 import struct
+import sys
+import time
+import tomllib
+import traceback
 import typing
 import unicodedata
 import zipfile
-import tkinter.filedialog as filedialog
+from dataclasses import dataclass, field
+from pathlib import Path
 
-from imgui_bundle import imgui, immapp, portable_file_dialogs, hello_imgui, rich_md
 import chardet
 import crossfiledialog
-import typst
-import tomllib
-import tomli_w
 import platformdirs
+import pycodestyle
+import pylint.lint
+import tomli_w
+import typst
+from imgui_bundle import hello_imgui, imgui, immapp, rich_md
 from showinfm import show_in_file_manager
 
 TYPST_PRELUDE = """
@@ -182,7 +183,7 @@ def submission_files_from_zip(filename: str) -> SubmissionFilesResult:
                 result.unrecognized_files.append(submission_filename+"/"+filename)
                 return None
             if is_text:
-                return auto_str(f.read())
+                return auto_str(f.read()).replace("\r\n", "\n")
             else:
                 return f.read()
 
@@ -214,7 +215,10 @@ def submission_files_from_zip(filename: str) -> SubmissionFilesResult:
         return files
 
     with zipfile.ZipFile(filename, "r") as sub:
-        for fname in sub.namelist():
+        for finfo in sub.infolist():
+            fname = finfo.filename
+            if finfo.is_dir():
+                continue
             m = RE_SUBMISSION_FILE.match(fname)
             if m is None:
                 result.skipped_files.append(fname)
@@ -253,6 +257,8 @@ class State:
     subm_files_ordered: list[list[SubmissionFileInfo]] = default_field([])
     excercise: str = ""
     group: str = ""
+
+    manual_subm_name: str = ""
 
     editing_file_info_idx: int|None = None
     focus_editing_file_info: bool = False
@@ -351,13 +357,13 @@ class TaskManager:
 
 RE_GUESS_EXCERCISE_GROUP = re.compile(r"^[\w ]+?\d+[\w -]+?(?P<ex>\d+)[\w -]+?(?P<gr>\d+)", re.UNICODE)
 
-def _task_open_submission_zip(ctx: Context, state: State) -> State:
+def _task_open_submission_or_submissions(ctx: Context, state: State, single_file: bool = False, manual_stud_name: str = "") -> State:
     ctx.msgq.put(Status("choosing file"))
 
     # TODO: Decide which dialog type to use
     #fname = filedialog.askopenfilename(filetypes=(("ZIP Archive", "*.zip"),), title="Open submission archive")
     fname = crossfiledialog.open_file("Open submission archive",
-        state.dirs.user_downloads_dir, "*.zip")
+        state.dirs.user_downloads_dir, ["*.zip", "*.py", "*.*"] if single_file else "*.zip")
     if fname == "" or fname is None:
         return state
 
@@ -367,6 +373,7 @@ def _task_open_submission_zip(ctx: Context, state: State) -> State:
         state.excercise = f"Uebung {m["ex"]}"
         state.group = f"EPR{m["gr"]}"
 
+    # TODO: Rename submission_files_from_zip and allow it handling single submissions as well
     submission_files = submission_files_from_zip(fname)
     state.subms = submission_files.submissions
     state.subm_files_ordered = []
@@ -531,7 +538,7 @@ def _task_pack_feedback_zip(ctx: Context, state: State) -> State:
 def draw_gui(state: State, task_mgr: TaskManager) -> None:
     imgui.begin_disabled(task_mgr.working)
     if imgui.button("Open submission ZIP"):
-        task_mgr.enqueue(Task(_task_open_submission_zip, (state,)))
+        task_mgr.enqueue(Task(_task_open_submission_or_submissions, (state,)))
         # TODO: This is a very hacky way of doing the popup
         imgui.open_popup("Status")
     imgui.same_line()
@@ -539,6 +546,8 @@ def draw_gui(state: State, task_mgr: TaskManager) -> None:
     if imgui.button("Export to feedback folder"):
         task_mgr.enqueue(Task(_task_export_to_feedback_folder, (state,)))
         imgui.open_popup("Status")
+    if state.subms is None:
+        imgui.set_item_tooltip("You must open a submission ZIP first")
     imgui.end_disabled()
     imgui.same_line()
     if imgui.button("Pack feedback ZIP"):
@@ -593,6 +602,13 @@ def draw_gui(state: State, task_mgr: TaskManager) -> None:
             if imgui.selectable(f"{s.stud_name} ({s.stud_id})", i == state.subm_idx, imgui.SelectableFlags_.select_on_nav)[0]:
                 state.subm_idx = i
                 state.editing_file_info_idx = None
+        imgui.separator_text("Add manual submission")
+        imgui.set_next_item_width(-imgui.calc_text_size("Submitter name").x)
+        changed, manual_subm_name = imgui.input_text("Submitter name", state.manual_subm_name)
+        if changed:
+            state.manual_subm_name = manual_subm_name
+        if imgui.button("Select file"):
+            task_mgr.enqueue(Task(_task_open_submission_or_submissions, (state, True)))
         imgui.end()
         imgui.begin("Contents")
         if state.subm_idx < len(state.subms):
@@ -737,6 +753,44 @@ def draw_gui(state: State, task_mgr: TaskManager) -> None:
             pass
 
 def main():
+    """
+    def get_epr_lint_message_ids() -> list[str]:
+        import eprtool.epr_lint
+        msgs = eprtool.epr_lint.EprChecker.msgs | eprtool.epr_lint.EprRawFileChecker.msgs
+        return list(msgs.keys())
+
+    message_ids = get_epr_lint_message_ids()+[
+        "C0103", # invalid-name
+        "C0112", # empty-docstring
+        "C0114", # missing-module-docstring
+        "C0115", # missing-class-docstring
+        "C0116", # missing-function-docstring
+        "C0198", # bad-docstring-quotes
+        "C0199", # docstring-first-line-empty
+        #"C0301", # line-too-long
+        "C0410", # multiple-imports
+        "C0411", # wrong-import-order
+        "C0412", # ungrouped-imports
+        "C0413", # wrong-import-position
+        "C2401", # non-ascii-name
+        "C2701", # import-private-name
+        "W3201", # bad-dunder-name
+        "E",
+        "W",
+    ]
+    print("running pylint...")
+    pylint.lint.Run(("--load-plugins=eprtool.epr_lint,pylint.extensions.docstyle,pylint.extensions.dunder,pylint.extensions.private_import",
+        "--disable=all",
+        "--enable="+",".join(message_ids),
+        "--output-format=json2",
+        "example.py"), exit=False)
+    print("done running pylint")
+
+    style_guide = pycodestyle.StyleGuide()
+    print("pycodestyle:", style_guide.input_file("example.py"))
+    return
+    """
+
     state = State(
         platformdirs.PlatformDirs("eprtool"),
         help_markdown=read_file_str(str(get_res_dir()/"HELP.md")))
