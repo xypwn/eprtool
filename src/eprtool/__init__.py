@@ -142,11 +142,12 @@ TYPST_IMAGE_FORMATS = {
 }
 
 @dataclass
-class SubmissionArchive:
+class SingleSubmission:
     stud_name: str
     stud_id: str
     filename: str
     files: dict[str, str|bytes]
+    is_manually_added: bool = False
 
     def folder_name(self) -> str:
         return f"{self.stud_name}_{self.stud_id}"
@@ -155,12 +156,12 @@ RE_SUBMISSION_FILE = re.compile(r"^(?P<name>[^ ]+ [^_]+)_(?P<id>\d+)_assignsubmi
 
 @dataclass
 class SubmissionFilesResult:
-    submissions: list[SubmissionArchive] = default_field([])
+    submissions: list[SingleSubmission] = default_field([])
     skipped_files: list[str] = default_field([])
     unrecognized_files: list[str] = default_field([])
 
 # Submission may be ZIP or single file
-def submission_files_from_zip(filename: str) -> SubmissionFilesResult:
+def submission_files_from_zip_or_file(filename: str, stud_name_if_single_subm_file: str|None = None) -> SubmissionFilesResult:
     # Automatically decodes bytes into a string, guessing the encoding.
     def auto_str(b: bytes) -> str:
         enc = chardet.detect(b, include_encodings=["utf-8", "437"])["encoding"]
@@ -214,22 +215,32 @@ def submission_files_from_zip(filename: str) -> SubmissionFilesResult:
                     files[filename] = data
         return files
 
-    with zipfile.ZipFile(filename, "r") as sub:
-        for finfo in sub.infolist():
-            fname = finfo.filename
-            if finfo.is_dir():
-                continue
-            m = RE_SUBMISSION_FILE.match(fname)
-            if m is None:
-                result.skipped_files.append(fname)
-                continue
-            result.submissions.append(SubmissionArchive(
-                m["name"],
-                m["id"],
+    if stud_name_if_single_subm_file is not None:
+        with open(filename, "rb") as f:
+            fname = os.path.basename(filename)
+            result.submissions.append(SingleSubmission(
+                stud_name_if_single_subm_file,
+                stud_name_if_single_subm_file, # name becomes ID in this case (TODO: See if reasonable)
                 fname,
-                submission_file_to_files(fname, sub.open(fname)),
+                submission_file_to_files(fname, f),
+                is_manually_added=True,
             ))
-    result.submissions.sort(key=lambda s: s.folder_name())
+    else:
+        with zipfile.ZipFile(filename, "r") as sub:
+            for finfo in sub.infolist():
+                fname = finfo.filename
+                if finfo.is_dir():
+                    continue
+                m = RE_SUBMISSION_FILE.match(fname)
+                if m is None:
+                    result.skipped_files.append(fname)
+                    continue
+                result.submissions.append(SingleSubmission(
+                    m["name"],
+                    m["id"],
+                    fname,
+                    submission_file_to_files(fname, sub.open(fname)),
+                ))
     return result
 
 SubmissionFileKindTag = typing.Literal["embed", "separate", "ignore"]
@@ -252,9 +263,9 @@ class State:
 
     rebuild_dock_layout = True
 
-    subms: list[SubmissionArchive]|None = None
+    subms: list[SingleSubmission]|None = None
     subm_idx: int = 0
-    subm_files_ordered: list[list[SubmissionFileInfo]] = default_field([])
+    subm_file_cinfos: dict[str, list[SubmissionFileInfo]] = default_field([]) # id to custom file infos
     excercise: str = ""
     group: str = ""
 
@@ -357,48 +368,65 @@ class TaskManager:
 
 RE_GUESS_EXCERCISE_GROUP = re.compile(r"^[\w ]+?\d+[\w -]+?(?P<ex>\d+)[\w -]+?(?P<gr>\d+)", re.UNICODE)
 
-def _task_open_submission_or_submissions(ctx: Context, state: State, single_file: bool = False, manual_stud_name: str = "") -> State:
+def _task_open_submission_or_submissions(ctx: Context, state: State, stud_name_if_single_subm_file: str|None = "") -> State:
     ctx.msgq.put(Status("choosing file"))
+
+    single_subm_file = stud_name_if_single_subm_file is not None
 
     # TODO: Decide which dialog type to use
     #fname = filedialog.askopenfilename(filetypes=(("ZIP Archive", "*.zip"),), title="Open submission archive")
     fname = crossfiledialog.open_file("Open submission archive",
-        state.dirs.user_downloads_dir, ["*.zip", "*.py", "*.*"] if single_file else "*.zip")
+        state.dirs.user_downloads_dir, ["*.zip", "*.py", "*.*"] if single_subm_file else "*.zip")
     if fname == "" or fname is None:
         return state
 
-    # Guess excercise title and group
-    m = RE_GUESS_EXCERCISE_GROUP.match(os.path.basename(fname))
-    if m is not None:
-        state.excercise = f"Uebung {m["ex"]}"
-        state.group = f"EPR{m["gr"]}"
+    if not single_subm_file:
+        # Guess excercise title and group
+        m = RE_GUESS_EXCERCISE_GROUP.match(os.path.basename(fname))
+        if m is not None:
+            state.excercise = f"Uebung {m["ex"]}"
+            state.group = f"EPR{m["gr"]}"
+        else:
+            state.info_popup += "- Unable to auto-detect excercise and group number. Please enter manually.\n"
 
-    # TODO: Rename submission_files_from_zip and allow it handling single submissions as well
-    submission_files = submission_files_from_zip(fname)
-    state.subms = submission_files.submissions
-    state.subm_files_ordered = []
-    for i, subm in enumerate(state.subms):
-        state.subm_files_ordered.append([])
+    submission_files = submission_files_from_zip_or_file(fname, stud_name_if_single_subm_file)
+    if not single_subm_file:
+        # If we got a submission archive, we want to replace old
+        # submissions.
+        state.subms = None
+        state.subm_file_cinfos = {}
+    if state.subms is None:
+        state.subms = []
+    state.subms += submission_files.submissions
+    state.subms.sort(key=lambda s: s.stud_name)
+
+    if single_subm_file:
+        state.subm_idx = state.subms.index(submission_files.submissions[0])
+    else:
+        state.subm_idx = 0
+
+    for subm in submission_files.submissions:
+        state.subm_file_cinfos[subm.stud_id] = []
         for fname in sorted(subm.files.keys()):
-            state.subm_files_ordered[i].append(SubmissionFileInfo(
+            state.subm_file_cinfos[subm.stud_id].append(SubmissionFileInfo(
                 fname,
                 fname,
                 "separate" if fname.lower().endswith(".pdf") else "embed",
                 ))
-    # If all filenames in a submission share a common first path element,
-    # strip that by default.
-    for i, _ in enumerate(state.subms):
+
+        # If all filenames in a submission share a common first path element,
+        # strip that by default.
         strip_first_elem = True
-        ordered_finfos = state.subm_files_ordered[i]
-        if len(ordered_finfos):
-            common_first_elem = ordered_finfos[0].custom_filename.split("/")[0]
-            for finfo in ordered_finfos:
+        cinfos = state.subm_file_cinfos[subm.stud_id]
+        if len(cinfos):
+            common_first_elem = cinfos[0].custom_filename.split("/")[0]
+            for finfo in cinfos:
                 elems = finfo.custom_filename.split("/")
                 if len(elems) < 2 or elems[0] != common_first_elem:
                     strip_first_elem = False
                     break
         if strip_first_elem:
-            for finfo in ordered_finfos:
+            for finfo in cinfos:
                 finfo.custom_filename = "/".join(finfo.custom_filename.split("/")[1:])
 
     def filename_list_md(names: list[str]) -> str:
@@ -437,13 +465,13 @@ def _task_export_to_feedback_folder(ctx: Context, state: State) -> State:
         }
         ctx.msgq.put(Status(f"Unpacking files and compiling PDFs ({i}/{len(state.subms)})", i/len(state.subms)))
         typst_code: list[str] = []
-        for finfo in state.subm_files_ordered[i]:
+        for finfo in state.subm_file_cinfos[subm.stud_id]:
             tomldata["submissions"][subm.stud_id]["files"].append({
                 "name": finfo.filename,
                 "custom-name": finfo.custom_filename,
                 "kind": finfo.kind,
             })
-            fdata = state.subms[i].files[finfo.filename]
+            fdata = subm.files[finfo.filename]
             if finfo.kind == "ignore":
                 continue
 
@@ -538,7 +566,7 @@ def _task_pack_feedback_zip(ctx: Context, state: State) -> State:
 def draw_gui(state: State, task_mgr: TaskManager) -> None:
     imgui.begin_disabled(task_mgr.working)
     if imgui.button("Open submission ZIP"):
-        task_mgr.enqueue(Task(_task_open_submission_or_submissions, (state,)))
+        task_mgr.enqueue(Task(_task_open_submission_or_submissions, (state, None)))
         # TODO: This is a very hacky way of doing the popup
         imgui.open_popup("Status")
     imgui.same_line()
@@ -565,9 +593,7 @@ def draw_gui(state: State, task_mgr: TaskManager) -> None:
             label = metadata.get("label", k)
             hint = metadata.get("hint", "")
             tooltip = metadata.get("tooltip", "")
-            v_changed, v_new = imgui.input_text_with_hint(label, hint, v)
-            if v_changed:
-                state.settings.__dict__[k] = v_new
+            if imgui_object_field_input_text(label, state.settings, k, hint):
                 state.settings_last_edited_time = imgui.get_time()
                 state.settings_saved = False
             if tooltip:
@@ -604,22 +630,29 @@ def draw_gui(state: State, task_mgr: TaskManager) -> None:
                 state.editing_file_info_idx = None
         imgui.separator_text("Add manual submission")
         imgui.set_next_item_width(-imgui.calc_text_size("Submitter name").x)
-        changed, manual_subm_name = imgui.input_text("Submitter name", state.manual_subm_name)
-        if changed:
-            state.manual_subm_name = manual_subm_name
-        if imgui.button("Select file"):
-            task_mgr.enqueue(Task(_task_open_submission_or_submissions, (state, True)))
+        imgui_object_field_input_text("Submitter name", state, "manual_subm_name")
+        imgui.begin_disabled(state.manual_subm_name == "")
+        if imgui.button("Select submission file"):
+            task_mgr.enqueue(Task(_task_open_submission_or_submissions, (state, state.manual_subm_name)))
+        imgui.end_disabled()
         imgui.end()
         imgui.begin("Contents")
         if state.subm_idx < len(state.subms):
             subm = state.subms[state.subm_idx]
-            ordered_finfos = state.subm_files_ordered[state.subm_idx]
+            cinfos = state.subm_file_cinfos[subm.stud_id]
             imgui.push_text_wrap_pos()
             imgui.text(f"Submitter: {subm.stud_name} ({s.stud_id})")
-            imgui.text(f"Submission filename: {"/".join(subm.filename.split("/")[1:])}")
+            if subm.is_manually_added:
+                subm_filename = subm.filename
+            else:
+                subm_filename = "/".join(subm.filename.split("/")[1:])
+            imgui.text(f"Submission filename: {subm_filename}")
+            if subm.is_manually_added:
+                if imgui.button("Delete"):
+                    imgui.open_popup("Delete submission?")
             imgui.separator_text("Files")
             imgui.push_item_flag(imgui.ItemFlags_.allow_duplicate_id, True)
-            for i, info in enumerate(ordered_finfos):
+            for i, info in enumerate(cinfos):
                 if state.editing_file_info_idx != i:
                     imgui.selectable(f"{info.custom_filename} [{info.kind}]", False)
                     if imgui_is_item_double_clicked():
@@ -630,9 +663,9 @@ def draw_gui(state: State, task_mgr: TaskManager) -> None:
                     # when dragging too quickly, but it seems to work well enough.
                     if imgui.is_item_active() and not imgui.is_item_hovered():
                         i_next = i + (-1 if imgui.get_mouse_drag_delta(imgui.MouseButton_.left)[1] < 0.0 else 1)
-                        if 0 <= i_next < len(ordered_finfos):
-                            ordered_finfos[i], ordered_finfos[i_next] = \
-                                ordered_finfos[i_next], ordered_finfos[i]
+                        if 0 <= i_next < len(cinfos):
+                            cinfos[i], cinfos[i_next] = \
+                                cinfos[i_next], cinfos[i]
                             imgui.reset_mouse_drag_delta()
                 else:
                     any_active = False
@@ -654,6 +687,18 @@ def draw_gui(state: State, task_mgr: TaskManager) -> None:
                     state.focus_editing_file_info = False
             imgui.pop_item_flag()
             imgui.pop_text_wrap_pos()
+
+            imgui.set_next_window_pos(imgui.get_main_viewport().get_center(), imgui.Cond_.always, (0.5, 0.5))
+            if imgui.begin_popup_modal("Delete submission?", None, imgui.WindowFlags_.always_auto_resize)[0]:
+                imgui.text(f"Delete submission for {subm.stud_name} ({subm.stud_id})")
+                if imgui.button("Delete", (120, 0)):
+                    state.subms.pop(state.subm_idx)
+                    imgui.close_current_popup()
+                imgui.set_item_default_focus()
+                imgui.same_line()
+                if imgui.button("Cancel", (120, 0)):
+                    imgui.close_current_popup()
+                imgui.end_popup()
         imgui.end()
 
     def avail_size_without_button_row() -> tuple[float, float]:
@@ -664,7 +709,6 @@ def draw_gui(state: State, task_mgr: TaskManager) -> None:
 
     def begin_modal_box(name: str, initial_size: tuple[float, float]|None = None) -> bool:
         initial_size = initial_size or (400, 300)
-        style = imgui.get_style()
         imgui.set_next_window_size(initial_size, imgui.Cond_.appearing)
         imgui.set_next_window_pos(imgui.get_main_viewport().get_center(), imgui.Cond_.always, (0.5, 0.5))
         imgui.set_next_window_size_constraints((75, 75), (imgui.FLT_MAX, imgui.FLT_MAX))
