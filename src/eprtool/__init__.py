@@ -70,6 +70,15 @@ TYPST_PRELUDE = """
 #v(1em)
 """
 
+IGNORED_DIRS = (
+    "__MACOSX",
+    ".venv", "__pycache__", ".idea",
+)
+
+IGNORED_FILES = (
+    ".DS_Store",
+)
+
 def write_file(path: str|Path, data: bytes|str) -> None:
     path = Path(path)
     os.makedirs(path.parent, exist_ok=True)
@@ -125,7 +134,7 @@ def imgui_align_button_row(labels: typing.Iterable[str], align: typing.Literal["
             cx -= width/2
     imgui.set_cursor_screen_pos((cx, cy))
 
-def imgui_wrapping_clickable(label: str) -> bool:
+def imgui_wrapping_clickable(label: str, *, clicked_on_nav: bool = False) -> bool:
     """Somewhat of a mix of button and selectable for wrapping text
     """
     imgui.push_id(label)
@@ -151,6 +160,8 @@ def imgui_wrapping_clickable(label: str) -> bool:
         bg = imgui.get_color_u32(imgui.Col_.frame_bg_hovered)
     else:
         bg = 0
+    if clicked_on_nav and imgui.is_item_focused():
+        clicked = True
     imgui.get_window_draw_list().add_rect_filled(bb.min, bb.max, bg)
     imgui.set_cursor_screen_pos(bb.min + spacing)
     imgui.text_wrapped(label)
@@ -251,9 +262,11 @@ def submission_files_from_zip_or_file(filename: str, stud_name_if_single_subm_fi
                     # (some archivers don't seem to set the flag properly).
                     filename = auto_str(finfo.filename.encode('437'))
                 filename = unicodedata.normalize("NFC", filename)
-                if any(s in ("__MACOSX", ".DS_Store") for s in finfo.filename.split("/")):
-                    continue
                 if finfo.is_dir():
+                    continue
+                if any(s in IGNORED_DIRS for s in finfo.filename.split("/")[:-1]):
+                    continue
+                if os.path.basename(finfo.filename) in IGNORED_FILES:
                     continue
                 with ar.open(finfo.filename) as f:
                     data = file_to_str_or_bytes(filename, f)
@@ -300,8 +313,13 @@ class SubmissionFileInfo:
 
 @dataclass
 class Settings:
-    group_tutor: str = field(default="", metadata={"label": "Group and tutor", "hint": "e.g. EPR01 - Firstname"})
-    pdf_suffix: str = field(default="_kommentiert", metadata={"label": "PDF suffix", "tooltip": "E.g. for xournalpp: German -> _kommentiert, English -> _annotated"})
+    group_tutor: str = field(default="",
+        metadata={"label": "Group and tutor", "hint": "e.g. EPR01 - Firstname"})
+    pdf_suffix: str = field(default="_kommentiert",
+        metadata={"label": "PDF suffix", "tooltip": "E.g. for xournalpp: German -> _kommentiert, English -> _annotated"})
+    style_max_line_length: int = field(default=79,
+        metadata={"label": "Style: Max line length", "tooltip": "Maximum line length (pycodestyle E501)\n0 to disable",
+        "validate": lambda v: v >= 0})
 
 @dataclass
 class State:
@@ -644,7 +662,7 @@ def stylecheck_message_to_cte_doc_pos(msg: stylecheck.Message) -> tuple[imgui_ct
     end = DocPos(end_line, end_column)
     return start, end
 
-def set_preview_code(codeviewer: imgui_cte.TextEditor, filename: str, code: str) -> list[stylecheck.Message]:
+def set_preview_code(codeviewer: imgui_cte.TextEditor, filename: str, code: str, settings: Settings) -> list[stylecheck.Message]:
     match FileKind(filename).ext:
         case ".py":
             codeviewer.set_language(imgui_cte.TextEditor.Language.python())
@@ -662,7 +680,8 @@ def set_preview_code(codeviewer: imgui_cte.TextEditor, filename: str, code: str)
     WARN_FG = imgui.IM_COL32(180, 140, 0, 255)
 
     line_markers: dict[int, str] = {}
-    msgs = stylecheck.check(filename, code.encode("utf-8"))
+    msgs = stylecheck.check(filename, code.encode("utf-8"),
+        stylecheck.Config(settings.style_max_line_length))
     for msg in msgs:
         # FIXME: When squiggles overlap, they overwrite eachother at the overlapping portion.
         # Ideally, we would like to keep all squiggle tooltips. We could do that by again
@@ -718,14 +737,26 @@ def draw_gui(state: State, main_state: MainState, task_mgr: TaskManager) -> None
     imgui.set_item_tooltip("Help")
 
     if imgui.tree_node("Settings"):
-        for k, v in state.settings.__dict__.items():
+        for k in Settings.__dataclass_fields__:
             metadata = Settings.__dataclass_fields__[k].metadata
             label = metadata.get("label", k)
             hint = metadata.get("hint", "")
             tooltip = metadata.get("tooltip", "")
-            if imgui_object_field_input_text(label, state.settings, k, hint):
-                state.settings_last_edited_time = imgui.get_time()
-                state.settings_saved = False
+            validate = metadata.get("validate", lambda x: True)
+            typ = Settings.__dataclass_fields__[k].type
+            v = state.settings.__dict__[k]
+            changed, v = imgui.input_text_with_hint(label, hint, str(v))
+            if changed:
+                assert isinstance(typ, type)
+                try:
+                    v = typ(v)
+                    ok = True
+                except ValueError:
+                    ok = False
+                if ok and validate(v):
+                    state.settings.__dict__[k] = v
+                    state.settings_last_edited_time = imgui.get_time()
+                    state.settings_saved = False
             if tooltip:
                 imgui.set_item_tooltip(tooltip)
         if imgui.button("Reset UI dock layout"):
@@ -803,7 +834,7 @@ def draw_gui(state: State, main_state: MainState, task_mgr: TaskManager) -> None
                 if imgui.is_item_clicked() and FileKind(info.custom_filename).is_text:
                     text = subm.files[info.filename]
                     assert isinstance(text, str)
-                    msgs = set_preview_code(main_state.codeviewer, info.custom_filename, text)
+                    msgs = set_preview_code(main_state.codeviewer, info.custom_filename, text, state.settings)
                     state.lint_current_filename = info.custom_filename
                     state.lint_messages = msgs
                 if imgui_is_item_double_clicked():
@@ -871,7 +902,7 @@ def draw_gui(state: State, main_state: MainState, task_mgr: TaskManager) -> None
         for i, msg in enumerate(state.lint_messages):
             imgui.push_id(i)
             label = f"{msg.line}:{msg.column} {msg.msg} ({msg.source} {msg.msg_id})"
-            if imgui_wrapping_clickable(label):
+            if imgui_wrapping_clickable(label, clicked_on_nav=True):
                 start, end = stylecheck_message_to_cte_doc_pos(msg)
                 main_state.codeviewer.set_cursor(start)
                 main_state.codeviewer.select_region(start, end)

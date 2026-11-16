@@ -17,13 +17,14 @@ from eprtool import pylint_epr
 _PYLINT_EPR_MESSAGE_IDS = list((pylint_epr.EprChecker.msgs | pylint_epr.EprRawFileChecker.msgs).keys())
 
 _PYLINT_MESSAGE_IDS = _PYLINT_EPR_MESSAGE_IDS+[
+    # Conventions
     "C0103", # invalid-name
     "C0112", # empty-docstring
     "C0114", # missing-module-docstring
     "C0115", # missing-class-docstring
     "C0116", # missing-function-docstring
     "C0198", # bad-docstring-quotes
-    "C0199", # docstring-first-line-empty
+    #"C0199", # docstring-first-line-empty
     #"C0301", # line-too-long
     "C0410", # multiple-imports
     "C0411", # wrong-import-order
@@ -32,8 +33,28 @@ _PYLINT_MESSAGE_IDS = _PYLINT_EPR_MESSAGE_IDS+[
     "C2401", # non-ascii-name
     "C2701", # import-private-name
     "W3201", # bad-dunder-name
-    "E",
-    "W",
+    # Errors
+    "E0001", # syntax-error
+    "E0102", # function-redefined
+    "E0211", # no-method-argument
+    "E0213", # no-self-argument
+    "E2513", # invalid-character-esc
+    # Warnings
+    "W0104", # pointless-statement
+    "W0107", # unnecessary-pass
+    "W0201", # attribute-defined-outside-init
+    "W0222", # signature-differs
+    "W0231", # super-init-not-called
+    "W0301", # unnecessary-semicolon
+    "W0311", # bad-indentation
+    "W0401", # wildcard-import
+    "W0404", # reimported
+    "W0603", # global-statement
+    "W0622", # redefined-builtin
+    "W0702", # bare-except
+    "W0705", # duplicate-except
+    # Fatal
+    "F",
 ]
 
 @dataclass(frozen=True)
@@ -69,7 +90,7 @@ class Message:
 
     def __lt__(self, other: Message) -> bool:
         # Compare field-by-field, respecing None
-        for k in self.__dataclass_fields__:
+        for k in Message.__dataclass_fields__:
             a = self.__dict__[k]
             b = other.__dict__[k]
             if a is None:
@@ -106,6 +127,12 @@ class _PEP8MessageReport(pycodestyle.BaseReport):
             ))
         return code
 
+@dataclass
+class Config:
+    max_line_length: int = 79 # 0 to disable
+
+_DEFAULT_CONFIG = Config()
+
 @contextlib.contextmanager
 def context_stdin(data: bytes):
     prev_stdin = sys.stdin
@@ -113,7 +140,7 @@ def context_stdin(data: bytes):
     yield
     sys.stdin = prev_stdin
 
-def check(filename: str, file_data: bytes | None = None) -> list[Message]:
+def check(filename: str, file_data: bytes | None = None, cfg: Config = _DEFAULT_CONFIG) -> list[Message]:
     if file_data is None:
         with open(filename, "rb") as f:
             file_data = f.read()
@@ -131,7 +158,12 @@ def check(filename: str, file_data: bytes | None = None) -> list[Message]:
         msgs += [Message.from_pylint(msg) for msg in reporter.messages]
 
     with context_stdin(file_data):
-        style_guide = pycodestyle.StyleGuide(quiet=True, max_line_length=99)
+        ignore = pycodestyle.DEFAULT_IGNORE.split(",")
+        if cfg.max_line_length == 0:
+            ignore.append("E501")
+        style_guide = pycodestyle.StyleGuide(quiet=True,
+            max_line_length=cfg.max_line_length,
+            ignore=ignore)
         report = style_guide.init_report(_PEP8MessageReport)
         assert isinstance(report, _PEP8MessageReport)
         report.override_filename = filename
