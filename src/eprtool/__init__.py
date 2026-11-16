@@ -1,3 +1,4 @@
+import mimetypes
 import ctypes
 import multiprocessing as mp
 import multiprocessing.queues as mpq
@@ -149,7 +150,7 @@ def imgui_wrapping_clickable(label: str) -> bool:
     if imgui.is_item_hovered():
         bg = imgui.get_color_u32(imgui.Col_.frame_bg_hovered)
     else:
-        bg = imgui.get_color_u32((0, 0, 0, 0))
+        bg = 0
     imgui.get_window_draw_list().add_rect_filled(bb.min, bb.max, bg)
     imgui.set_cursor_screen_pos(bb.min + spacing)
     imgui.text_wrapped(label)
@@ -188,6 +189,28 @@ class SubmissionFilesResult:
     skipped_files: list[str] = field(default_factory=list)
     unrecognized_files: list[str] = field(default_factory=list)
 
+@dataclass
+class FileKind:
+    """Kind of file in the context of the tool
+    """
+    def __init__(self, filename: str):
+        ext = os.path.splitext(filename)[1].lower()
+        base = os.path.basename(filename).lower()
+        self.mimetype = None
+        self.is_text = False
+        if ext in mimetypes.types_map:
+            self.mimetype = mimetypes.types_map[ext]
+            self.is_text = self.mimetype.startswith("text/")
+        self.ext = ext
+        self.is_readme = base in ("readme", "readme.md", "readme.txt")
+        if self.is_readme:
+            self.is_text = True
+
+    mimetype: str | None
+    ext: str
+    is_text: bool
+    is_readme: bool
+
 # Submission may be ZIP or single file
 def submission_files_from_zip_or_file(filename: str, stud_name_if_single_subm_file: str|None = None) -> SubmissionFilesResult:
     # Automatically decodes bytes into a string, guessing the encoding.
@@ -201,17 +224,13 @@ def submission_files_from_zip_or_file(filename: str, stud_name_if_single_subm_fi
     # Returns single file, or unarchives a ZIP into multiple files.
     def submission_file_to_files(submission_filename: str, inp: typing.IO[bytes]) -> dict[str, str|bytes]:
         def file_to_str_or_bytes(filename: str, f: typing.IO[bytes]) -> str|bytes|None:
-            ext = os.path.splitext(filename)[1].lower()
-            if ext == ".py":  # noqa: SIM114
-                is_text = True
-            elif os.path.basename(filename).lower() in ("readme", "readme.md", "readme.txt"):
-                is_text = True
-            elif ext == ".pdf" or ext in TYPST_IMAGE_FORMATS:
-                is_text = False
-            else:
+            kind = FileKind(filename)
+            if (not kind.is_readme and
+                kind.ext not in (".py", ".pdf") and
+                kind.ext not in TYPST_IMAGE_FORMATS):
                 result.unrecognized_files.append(submission_filename+"/"+filename)
                 return None
-            if is_text:
+            if kind.is_text:
                 return auto_str(f.read()).replace("\r\n", "\n")
             else:
                 return f.read()
@@ -468,11 +487,13 @@ def _task_open_submission_or_submissions(ctx: Context, state: State, stud_name_i
                 finfo.custom_filename = "/".join(finfo.custom_filename.split("/")[1:])
 
     def filename_list_md(names: list[str]) -> str:
-        return "``` "+"\n".join(names)+" ```"
+        return "".join(f"  - `{n}`\n" for n in names)
     if submission_files.skipped_files:
-        state.info_popup += f"- Skipped {len(submission_files.skipped_files)} files in the submission archive that didn't look like submissions: {filename_list_md(submission_files.skipped_files)}\n"
+        state.info_popup += f"- Skipped {len(submission_files.skipped_files)} files in the submission archive that didn't look like submissions:\n"
+        state.info_popup += filename_list_md(submission_files.skipped_files)
     if submission_files.unrecognized_files:
-        state.info_popup += f"- Failed to recognize type of {len(submission_files.unrecognized_files)} submitted files: {filename_list_md(submission_files.unrecognized_files)}\n"
+        state.info_popup += f"- Failed to recognize type of {len(submission_files.unrecognized_files)} submitted files:\n"
+        state.info_popup += filename_list_md(submission_files.unrecognized_files)
 
     return state
 
@@ -517,15 +538,22 @@ def _task_export_to_feedback_folder(ctx: Context, state: State) -> State:
             if finfo.kind == "embed":
                 code = ""
                 code += f"== `{finfo.custom_filename}`\n"
-                ext = os.path.splitext(finfo.custom_filename)[1].lower()
+                kind = FileKind(finfo.custom_filename)
                 if isinstance(fdata, str):
-                    lang = "py"
-                    if ext != ".py":
-                        lang = "md" # TODO: more precise guessing
+                    if kind.ext == ".py":
+                        lang = "py"
+                    elif kind.ext == ".txt":
+                        lang = "txt"
+                    elif kind.is_readme:
+                        lang = "md"
+                    else:
+                        raise Exception(f"cannot embed text file {finfo.custom_filename!r} with unknown type")
                     code += f"#codly.new(```{lang}\n{fdata}\n```)\n"
                 else:
                     assert isinstance(fdata, bytes)
-                    code += f"#image(bytes(({"".join(str(b)+"," for b in fdata)})),\nwidth: 100%, format: \"{TYPST_IMAGE_FORMATS[ext]}\")\n"
+                    if kind.ext not in TYPST_IMAGE_FORMATS:
+                        raise Exception(f"cannot embed image file {finfo.custom_filename!r} with unknown type")
+                    code += f"#image(bytes(({"".join(str(b)+"," for b in fdata)})),\nwidth: 100%, format: \"{TYPST_IMAGE_FORMATS[kind.ext]}\")\n"
                 typst_code.append(code)
             else:
                 assert finfo.kind == "separate"
@@ -603,7 +631,7 @@ def _task_pack_feedback_zip(ctx: Context, state: State) -> State:
 
 def stylecheck_message_to_cte_doc_pos(msg: stylecheck.Message) -> tuple[imgui_cte.TextEditor.DocPos, imgui_cte.TextEditor.DocPos]:
     DocPos = imgui_cte.TextEditor.DocPos
-    line, column = max(msg.line - 1, 0), max(msg.column - 1, 0)
+    line, column = msg.line - 1, msg.column - 1
     start = DocPos(line, column)
     if msg.end_line is not None:
         end_line = msg.end_line - 1
@@ -617,8 +645,7 @@ def stylecheck_message_to_cte_doc_pos(msg: stylecheck.Message) -> tuple[imgui_ct
     return start, end
 
 def set_preview_code(codeviewer: imgui_cte.TextEditor, filename: str, code: str) -> list[stylecheck.Message]:
-    ext = os.path.splitext(filename)[1].lower()
-    match ext:
+    match FileKind(filename).ext:
         case ".py":
             codeviewer.set_language(imgui_cte.TextEditor.Language.python())
         case _:
@@ -628,22 +655,42 @@ def set_preview_code(codeviewer: imgui_cte.TextEditor, filename: str, code: str)
     codeviewer.set_text(code)
     codeviewer.set_read_only_enabled(True)
     codeviewer.set_show_mini_map_enabled(True)
+
+    ERROR_BG = imgui.IM_COL32(220, 50, 50, 56)
+    ERROR_FG = imgui.IM_COL32(220, 50, 50, 255)
+    WARN_BG = imgui.IM_COL32(180, 140, 0, 48)
+    WARN_FG = imgui.IM_COL32(180, 140, 0, 255)
+
+    line_markers: dict[int, str] = {}
     msgs = stylecheck.check(filename, code.encode("utf-8"))
     for msg in msgs:
+        # FIXME: When squiggles overlap, they overwrite eachother at the overlapping portion.
+        # Ideally, we would like to keep all squiggle tooltips. We could do that by again
+        # auto-merging tooltips like for the line markers (in this case it would be more
+        # complicated though).
+        tooltip = f"{msg.msg} ({msg.source} {msg.msg_id})"
         start, end = stylecheck_message_to_cte_doc_pos(msg)
-        error_bg = imgui.IM_COL32(220, 50, 50, 56)
-        error_fg = imgui.IM_COL32(220, 50, 50, 255)
-        warn_bg = imgui.IM_COL32(180, 140, 0, 48)
-        warn_fg = imgui.IM_COL32(180, 140, 0, 255)
-        codeviewer.add_squiggle(
-            start,
-            end,
-            2,
-            warn_fg,
-            f"{msg.msg} ({msg.source} {msg.msg_id})")
-        codeviewer.add_marker(start.line,
-            warn_fg, warn_bg,
-            "warning", "")
+        squiggle_not_visible = (
+            msg.msg_id == "W391" or # blank line at end of file
+            msg.msg_id == "W292" or # no newline at end of file
+            start.line < 0 or start.index < 0 or
+            (start.line == 0 and start.index == 0) # BOF tends to have a lot of annotations and they can't overlap atm (FIXME)
+        )
+        if not squiggle_not_visible:
+            codeviewer.add_squiggle(
+                start,
+                end,
+                2,
+                WARN_FG,
+                tooltip)
+        else:
+            if start.line not in line_markers:
+                line_markers[start.line] = ""
+            line_markers[start.line] += tooltip+"\n"
+    for line, tooltip in line_markers.items():
+        codeviewer.add_marker(line,
+            0, WARN_BG,
+            "warning", tooltip)
     return msgs
 
 def draw_gui(state: State, main_state: MainState, task_mgr: TaskManager) -> None:
@@ -700,11 +747,16 @@ def draw_gui(state: State, main_state: MainState, task_mgr: TaskManager) -> None
     dock_id = imgui.get_id("MainDock")
     if state.force_rebuild_dock_layout or imgui.internal.dock_builder_get_node(dock_id) is None:
         imgui.internal.dock_builder_add_node(dock_id)
-        sp = imgui.internal.dock_builder_split_node(dock_id, imgui.Dir.left, 0.4)
+        main_left = imgui.internal.dock_builder_split_node(dock_id, imgui.Dir.left, 0.4)
+
+        sp = imgui.internal.dock_builder_split_node(main_left.id_at_dir, imgui.Dir.up, 0.5)
         imgui.internal.dock_builder_dock_window("Submissions", sp.id_at_dir)
-        sp = imgui.internal.dock_builder_split_node(sp.id_at_opposite_dir, imgui.Dir.up, 0.5)
-        imgui.internal.dock_builder_dock_window("Contents", sp.id_at_dir)
-        imgui.internal.dock_builder_dock_window("Code preview", sp.id_at_opposite_dir)
+        imgui.internal.dock_builder_dock_window("Contents", sp.id_at_opposite_dir)
+
+        sp = imgui.internal.dock_builder_split_node(main_left.id_at_opposite_dir, imgui.Dir.up, 0.7)
+        imgui.internal.dock_builder_dock_window("Code preview", sp.id_at_dir)
+        imgui.internal.dock_builder_dock_window("Code messages", sp.id_at_opposite_dir)
+
         imgui.internal.dock_builder_finish(dock_id)
         state.force_rebuild_dock_layout = False
     imgui.dock_space(dock_id)
@@ -748,12 +800,12 @@ def draw_gui(state: State, main_state: MainState, task_mgr: TaskManager) -> None
         for i, info in enumerate(cinfos):
             if state.editing_file_info_idx != i:
                 imgui.selectable(f"{info.custom_filename} [{info.kind}]", False)
-                if imgui.is_item_clicked():
+                if imgui.is_item_clicked() and FileKind(info.custom_filename).is_text:
                     text = subm.files[info.filename]
-                    if isinstance(text, str):
-                        msgs = set_preview_code(main_state.codeviewer, info.custom_filename, text)
-                        state.lint_current_filename = info.custom_filename
-                        state.lint_messages = msgs
+                    assert isinstance(text, str)
+                    msgs = set_preview_code(main_state.codeviewer, info.custom_filename, text)
+                    state.lint_current_filename = info.custom_filename
+                    state.lint_messages = msgs
                 if imgui_is_item_double_clicked():
                     state.editing_file_info_idx = i
                     state.focus_editing_file_info = True
@@ -804,21 +856,27 @@ def draw_gui(state: State, main_state: MainState, task_mgr: TaskManager) -> None
     if state.lint_current_filename != "":
         assert _imgui_font_mono is not None
         rich_md.render(f"File: {state.lint_current_filename}")
-        if imgui.tree_node("Messages"):
-            imgui.begin_child("##Messages", (0, 100), imgui.ChildFlags_.resize_y)
-            for i, msg in enumerate(state.lint_messages):
-                imgui.push_id(i)
-                label = f"{msg.line}:{msg.column} {msg.msg} ({msg.source} {msg.msg_id})"
-                if imgui_wrapping_clickable(label):
-                    start, end = stylecheck_message_to_cte_doc_pos(msg)
-                    main_state.codeviewer.set_cursor(start)
-                    main_state.codeviewer.select_region(start, end)
-                imgui.pop_id()
-            imgui.end_child()
-            imgui.tree_pop()
         imgui.push_font(_imgui_font_mono, 0)
         main_state.codeviewer.render("##Code preview")
         imgui.pop_font()
+    else:
+        rich_md.render("*No file opened for preview*")
+    imgui.end()
+
+    imgui.begin("Code messages")
+    if state.lint_current_filename != "":
+        assert _imgui_font_mono is not None
+        rich_md.render(f"File: {state.lint_current_filename}")
+        imgui.begin_child("##Messages", (0, 0))
+        for i, msg in enumerate(state.lint_messages):
+            imgui.push_id(i)
+            label = f"{msg.line}:{msg.column} {msg.msg} ({msg.source} {msg.msg_id})"
+            if imgui_wrapping_clickable(label):
+                start, end = stylecheck_message_to_cte_doc_pos(msg)
+                main_state.codeviewer.set_cursor(start)
+                main_state.codeviewer.select_region(start, end)
+            imgui.pop_id()
+        imgui.end_child()
     else:
         rich_md.render("*No file opened for preview*")
     imgui.end()
