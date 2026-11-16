@@ -1,34 +1,30 @@
-from pathlib import Path
-import pkgutil
-import time
-import traceback
-import sys
-from dataclasses import dataclass, field
-import copy
 import ctypes
-import dataclasses
-import io
 import multiprocessing as mp
 import multiprocessing.queues as mpq
-import multiprocessing.sharedctypes as mpsct
-import multiprocessing.pool as mpp
 import os
+import pickle
 import queue
 import re
-import struct
+import sys
+import time
+import tomllib
+import traceback
 import typing
 import unicodedata
 import zipfile
-import tkinter.filedialog as filedialog
+from dataclasses import dataclass, field
+from pathlib import Path
 
-from imgui_bundle import imgui, immapp, portable_file_dialogs, hello_imgui, rich_md
 import chardet
 import crossfiledialog
-import typst
-import tomllib
-import tomli_w
 import platformdirs
+import tomli_w
+import typst
+from imgui_bundle import hello_imgui, imgui, immapp, rich_md
+from imgui_bundle import imgui_color_text_edit as imgui_cte
 from showinfm import show_in_file_manager
+
+from eprtool import stylecheck
 
 TYPST_PRELUDE = """
 #import "@preview/codly:2.0.0" as codly
@@ -91,7 +87,7 @@ def read_file_str(path: str|Path) -> str:
 
 def get_res_dir() -> Path:
     if getattr(sys, "frozen", False):
-        return Path(getattr(sys, "_MEIPASS"))/"eprtool"/"res"
+        return Path(getattr(sys, "_MEIPASS"))/"eprtool"/"res"  # noqa: B009
     else:
         return Path(__file__).parent/"res"
 
@@ -128,8 +124,41 @@ def imgui_align_button_row(labels: typing.Iterable[str], align: typing.Literal["
             cx -= width/2
     imgui.set_cursor_screen_pos((cx, cy))
 
-def default_field(x):
-    return dataclasses.field(default_factory=lambda: copy.deepcopy(x))
+def imgui_wrapping_clickable(label: str) -> bool:
+    """Somewhat of a mix of button and selectable for wrapping text
+    """
+    imgui.push_id(label)
+    style = imgui.get_style()
+    spacing = style.item_spacing/2
+    imgui.push_style_var_y(imgui.StyleVar_.item_spacing, 0.0)
+    imgui.push_style_var(imgui.StyleVar_.frame_rounding, 0)
+
+    def calc_bb(label: str) -> imgui.internal.ImRect:
+        avail = imgui.get_content_region_avail()
+        pos = imgui.get_cursor_screen_pos()
+        size = imgui.calc_text_size(label, wrap_width=avail.x)
+        size.x = avail.x
+        return imgui.internal.ImRect(
+            pos.x - spacing.x,          pos.y,
+            pos.x + size.x + spacing.x, pos.y + size.y + 2*spacing.y,
+        )
+
+    bb = calc_bb(label) # bounding box
+    imgui.set_cursor_screen_pos(bb.min)
+    clicked = imgui.invisible_button("##btn", bb.get_size(), imgui.ButtonFlags_.enable_nav)
+    if imgui.is_item_hovered():
+        bg = imgui.get_color_u32(imgui.Col_.frame_bg_hovered)
+    else:
+        bg = imgui.get_color_u32((0, 0, 0, 0))
+    imgui.get_window_draw_list().add_rect_filled(bb.min, bb.max, bg)
+    imgui.set_cursor_screen_pos(bb.min + spacing)
+    imgui.text_wrapped(label)
+    imgui.set_cursor_screen_pos((bb.min.x + spacing.x, bb.max.y))
+
+    imgui.pop_style_var()
+    imgui.pop_style_var()
+    imgui.pop_id()
+    return clicked
 
 TYPST_IMAGE_FORMATS = {
     ".png": "png",
@@ -141,11 +170,12 @@ TYPST_IMAGE_FORMATS = {
 }
 
 @dataclass
-class SubmissionArchive:
+class SingleSubmission:
     stud_name: str
     stud_id: str
     filename: str
     files: dict[str, str|bytes]
+    is_manually_added: bool = False
 
     def folder_name(self) -> str:
         return f"{self.stud_name}_{self.stud_id}"
@@ -154,12 +184,12 @@ RE_SUBMISSION_FILE = re.compile(r"^(?P<name>[^ ]+ [^_]+)_(?P<id>\d+)_assignsubmi
 
 @dataclass
 class SubmissionFilesResult:
-    submissions: list[SubmissionArchive] = default_field([])
-    skipped_files: list[str] = default_field([])
-    unrecognized_files: list[str] = default_field([])
+    submissions: list[SingleSubmission] = field(default_factory=list)
+    skipped_files: list[str] = field(default_factory=list)
+    unrecognized_files: list[str] = field(default_factory=list)
 
 # Submission may be ZIP or single file
-def submission_files_from_zip(filename: str) -> SubmissionFilesResult:
+def submission_files_from_zip_or_file(filename: str, stud_name_if_single_subm_file: str|None = None) -> SubmissionFilesResult:
     # Automatically decodes bytes into a string, guessing the encoding.
     def auto_str(b: bytes) -> str:
         enc = chardet.detect(b, include_encodings=["utf-8", "437"])["encoding"]
@@ -172,7 +202,7 @@ def submission_files_from_zip(filename: str) -> SubmissionFilesResult:
     def submission_file_to_files(submission_filename: str, inp: typing.IO[bytes]) -> dict[str, str|bytes]:
         def file_to_str_or_bytes(filename: str, f: typing.IO[bytes]) -> str|bytes|None:
             ext = os.path.splitext(filename)[1].lower()
-            if ext == ".py":
+            if ext == ".py":  # noqa: SIM114
                 is_text = True
             elif os.path.basename(filename).lower() in ("readme", "readme.md", "readme.txt"):
                 is_text = True
@@ -182,7 +212,7 @@ def submission_files_from_zip(filename: str) -> SubmissionFilesResult:
                 result.unrecognized_files.append(submission_filename+"/"+filename)
                 return None
             if is_text:
-                return auto_str(f.read())
+                return auto_str(f.read()).replace("\r\n", "\n")
             else:
                 return f.read()
 
@@ -213,19 +243,32 @@ def submission_files_from_zip(filename: str) -> SubmissionFilesResult:
                     files[filename] = data
         return files
 
-    with zipfile.ZipFile(filename, "r") as sub:
-        for fname in sub.namelist():
-            m = RE_SUBMISSION_FILE.match(fname)
-            if m is None:
-                result.skipped_files.append(fname)
-                continue
-            result.submissions.append(SubmissionArchive(
-                m["name"],
-                m["id"],
+    if stud_name_if_single_subm_file is not None:
+        with open(filename, "rb") as f:
+            fname = os.path.basename(filename)
+            result.submissions.append(SingleSubmission(
+                stud_name_if_single_subm_file,
+                stud_name_if_single_subm_file, # name becomes ID in this case (TODO: See if reasonable)
                 fname,
-                submission_file_to_files(fname, sub.open(fname)),
+                submission_file_to_files(fname, f),
+                is_manually_added=True,
             ))
-    result.submissions.sort(key=lambda s: s.folder_name())
+    else:
+        with zipfile.ZipFile(filename, "r") as sub:
+            for finfo in sub.infolist():
+                fname = finfo.filename
+                if finfo.is_dir():
+                    continue
+                m = RE_SUBMISSION_FILE.match(fname)
+                if m is None:
+                    result.skipped_files.append(fname)
+                    continue
+                result.submissions.append(SingleSubmission(
+                    m["name"],
+                    m["id"],
+                    fname,
+                    submission_file_to_files(fname, sub.open(fname)),
+                ))
     return result
 
 SubmissionFileKindTag = typing.Literal["embed", "separate", "ignore"]
@@ -241,29 +284,35 @@ class Settings:
     group_tutor: str = field(default="", metadata={"label": "Group and tutor", "hint": "e.g. EPR01 - Firstname"})
     pdf_suffix: str = field(default="_kommentiert", metadata={"label": "PDF suffix", "tooltip": "E.g. for xournalpp: German -> _kommentiert, English -> _annotated"})
 
-# State that can be passed to tasks
 @dataclass
 class State:
+    """State that can be passed to tasks
+    """
     dirs: platformdirs.PlatformDirsABC
 
-    rebuild_dock_layout = True
+    force_rebuild_dock_layout = False
 
-    subms: list[SubmissionArchive]|None = None
+    subms: list[SingleSubmission]|None = None
     subm_idx: int = 0
-    subm_files_ordered: list[list[SubmissionFileInfo]] = default_field([])
+    subm_file_cinfos: dict[str, list[SubmissionFileInfo]] = field(default_factory=dict) # id to custom file infos
     excercise: str = ""
     group: str = ""
 
-    editing_file_info_idx: int|None = None
+    manual_subm_name: str = ""
+
+    editing_file_info_idx: int | None = None
     focus_editing_file_info: bool = False
 
     last_exported_folder: str = ""
+
+    lint_current_filename: str = ""
+    lint_messages: list[stylecheck.Message] = field(default_factory=list)
 
     info_popup: str = ""
     info_popup_show_file: str = ""
     info_popup_show_folder: str = ""
 
-    settings: Settings = default_field(Settings())
+    settings: Settings = field(default_factory=Settings)
     settings_saved: bool = True
     settings_last_edited_time: float = 0
 
@@ -271,6 +320,12 @@ class State:
 
     def settings_path(self) -> str:
         return os.path.join(self.dirs.user_config_dir, "settings.toml")
+
+@dataclass
+class MainState:
+    """State that is only accessible to the main process
+    """
+    codeviewer: imgui_cte.TextEditor
 
 @dataclass
 class Status:
@@ -306,7 +361,7 @@ def _task_worker(ctx: Context, taskq: mp.Queue[Task|Stop], resq: mp.Queue[State|
         try:
             res = task.fn(*([ctx]+list(task.args)))
             ok = True
-        except BaseException as e:
+        except BaseException as e:  # noqa: BLE001
             resq.put(TaskException(e))
         if ok:
             assert isinstance(res, State|None)
@@ -351,47 +406,65 @@ class TaskManager:
 
 RE_GUESS_EXCERCISE_GROUP = re.compile(r"^[\w ]+?\d+[\w -]+?(?P<ex>\d+)[\w -]+?(?P<gr>\d+)", re.UNICODE)
 
-def _task_open_submission_zip(ctx: Context, state: State) -> State:
+def _task_open_submission_or_submissions(ctx: Context, state: State, stud_name_if_single_subm_file: str|None = "") -> State:
     ctx.msgq.put(Status("choosing file"))
+
+    single_subm_file = stud_name_if_single_subm_file is not None
 
     # TODO: Decide which dialog type to use
     #fname = filedialog.askopenfilename(filetypes=(("ZIP Archive", "*.zip"),), title="Open submission archive")
     fname = crossfiledialog.open_file("Open submission archive",
-        state.dirs.user_downloads_dir, "*.zip")
+        state.dirs.user_downloads_dir, ["*.zip", "*.py", "*.*"] if single_subm_file else "*.zip")
     if fname == "" or fname is None:
         return state
 
-    # Guess excercise title and group
-    m = RE_GUESS_EXCERCISE_GROUP.match(os.path.basename(fname))
-    if m is not None:
-        state.excercise = f"Uebung {m["ex"]}"
-        state.group = f"EPR{m["gr"]}"
+    if not single_subm_file:
+        # Guess excercise title and group
+        m = RE_GUESS_EXCERCISE_GROUP.match(os.path.basename(fname))
+        if m is not None:
+            state.excercise = f"Uebung {m["ex"]}"
+            state.group = f"EPR{m["gr"]}"
+        else:
+            state.info_popup += "- Unable to auto-detect excercise and group number. Please enter manually.\n"
 
-    submission_files = submission_files_from_zip(fname)
-    state.subms = submission_files.submissions
-    state.subm_files_ordered = []
-    for i, subm in enumerate(state.subms):
-        state.subm_files_ordered.append([])
+    submission_files = submission_files_from_zip_or_file(fname, stud_name_if_single_subm_file)
+    if not single_subm_file:
+        # If we got a submission archive, we want to replace old
+        # submissions.
+        state.subms = None
+        state.subm_file_cinfos = {}
+    if state.subms is None:
+        state.subms = []
+    state.subms += submission_files.submissions
+    state.subms.sort(key=lambda s: s.stud_name)
+
+    if single_subm_file:
+        state.subm_idx = state.subms.index(submission_files.submissions[0])
+    else:
+        state.subm_idx = 0
+
+    for subm in submission_files.submissions:
+        state.subm_file_cinfos[subm.stud_id] = []
         for fname in sorted(subm.files.keys()):
-            state.subm_files_ordered[i].append(SubmissionFileInfo(
+            state.subm_file_cinfos[subm.stud_id].append(SubmissionFileInfo(
                 fname,
                 fname,
                 "separate" if fname.lower().endswith(".pdf") else "embed",
                 ))
-    # If all filenames in a submission share a common first path element,
-    # strip that by default.
-    for i, _ in enumerate(state.subms):
+
+        # If all filenames in a submission share a common first path element,
+        # strip that by default.
         strip_first_elem = True
-        ordered_finfos = state.subm_files_ordered[i]
-        if len(ordered_finfos):
-            common_first_elem = ordered_finfos[0].custom_filename.split("/")[0]
-            for finfo in ordered_finfos:
+        cinfos = state.subm_file_cinfos[subm.stud_id]
+        if len(cinfos):
+            common_first_elem = cinfos[0].custom_filename.split("/")[0]
+            for finfo in cinfos:
                 elems = finfo.custom_filename.split("/")
                 if len(elems) < 2 or elems[0] != common_first_elem:
                     strip_first_elem = False
                     break
         if strip_first_elem:
-            for finfo in ordered_finfos:
+            for finfo in cinfos:
                 finfo.custom_filename = "/".join(finfo.custom_filename.split("/")[1:])
 
     def filename_list_md(names: list[str]) -> str:
@@ -430,13 +503,13 @@ def _task_export_to_feedback_folder(ctx: Context, state: State) -> State:
         }
         ctx.msgq.put(Status(f"Unpacking files and compiling PDFs ({i}/{len(state.subms)})", i/len(state.subms)))
         typst_code: list[str] = []
-        for finfo in state.subm_files_ordered[i]:
+        for finfo in state.subm_file_cinfos[subm.stud_id]:
             tomldata["submissions"][subm.stud_id]["files"].append({
                 "name": finfo.filename,
                 "custom-name": finfo.custom_filename,
                 "kind": finfo.kind,
             })
-            fdata = state.subms[i].files[finfo.filename]
+            fdata = subm.files[finfo.filename]
             if finfo.kind == "ignore":
                 continue
 
@@ -447,7 +520,7 @@ def _task_export_to_feedback_folder(ctx: Context, state: State) -> State:
                 ext = os.path.splitext(finfo.custom_filename)[1].lower()
                 if isinstance(fdata, str):
                     lang = "py"
-                    if not ext == ".py":
+                    if ext != ".py":
                         lang = "md" # TODO: more precise guessing
                     code += f"#codly.new(```{lang}\n{fdata}\n```)\n"
                 else:
@@ -523,15 +596,60 @@ def _task_pack_feedback_zip(ctx: Context, state: State) -> State:
     state.info_popup = ""
     if packed_files != total_files:
         state.info_popup += f"> [!WARNING]\n> Found {total_files-packed_files}/{total_files} unannotated PDFs!\n\n"
-    state.info_popup += f"Successfully added feedback ZIP to folder."
+    state.info_popup += "Successfully added feedback ZIP to folder."
     state.info_popup_show_file = zip_path
 
     return state
 
-def draw_gui(state: State, task_mgr: TaskManager) -> None:
+def stylecheck_message_to_cte_doc_pos(msg: stylecheck.Message) -> tuple[imgui_cte.TextEditor.DocPos, imgui_cte.TextEditor.DocPos]:
+    DocPos = imgui_cte.TextEditor.DocPos
+    line, column = max(msg.line - 1, 0), max(msg.column - 1, 0)
+    start = DocPos(line, column)
+    if msg.end_line is not None:
+        end_line = msg.end_line - 1
+    else:
+        end_line = line
+    if msg.end_column is not None:
+        end_column = msg.end_column - 1
+    else:
+        end_column = column + 1
+    end = DocPos(end_line, end_column)
+    return start, end
+
+def set_preview_code(codeviewer: imgui_cte.TextEditor, filename: str, code: str) -> list[stylecheck.Message]:
+    ext = os.path.splitext(filename)[1].lower()
+    match ext:
+        case ".py":
+            codeviewer.set_language(imgui_cte.TextEditor.Language.python())
+        case _:
+            # There's a bug, so we use markdown as default for now.
+            # See https://github.com/pthom/imgui_bundle/issues/512.
+            codeviewer.set_language(imgui_cte.TextEditor.Language.markdown())
+    codeviewer.set_text(code)
+    codeviewer.set_read_only_enabled(True)
+    codeviewer.set_show_mini_map_enabled(True)
+    msgs = stylecheck.check(filename, code.encode("utf-8"))
+    for msg in msgs:
+        start, end = stylecheck_message_to_cte_doc_pos(msg)
+        error_bg = imgui.IM_COL32(220, 50, 50, 56)
+        error_fg = imgui.IM_COL32(220, 50, 50, 255)
+        warn_bg = imgui.IM_COL32(180, 140, 0, 48)
+        warn_fg = imgui.IM_COL32(180, 140, 0, 255)
+        codeviewer.add_squiggle(
+            start,
+            end,
+            2,
+            warn_fg,
+            f"{msg.msg} ({msg.source} {msg.msg_id})")
+        codeviewer.add_marker(start.line,
+            warn_fg, warn_bg,
+            "warning", "")
+    return msgs
+
+def draw_gui(state: State, main_state: MainState, task_mgr: TaskManager) -> None:
     imgui.begin_disabled(task_mgr.working)
     if imgui.button("Open submission ZIP"):
-        task_mgr.enqueue(Task(_task_open_submission_zip, (state,)))
+        task_mgr.enqueue(Task(_task_open_submission_or_submissions, (state, None)))
         # TODO: This is a very hacky way of doing the popup
         imgui.open_popup("Status")
     imgui.same_line()
@@ -539,6 +657,8 @@ def draw_gui(state: State, task_mgr: TaskManager) -> None:
     if imgui.button("Export to feedback folder"):
         task_mgr.enqueue(Task(_task_export_to_feedback_folder, (state,)))
         imgui.open_popup("Status")
+    if state.subms is None:
+        imgui.set_item_tooltip("You must open a submission ZIP first")
     imgui.end_disabled()
     imgui.same_line()
     if imgui.button("Pack feedback ZIP"):
@@ -556,13 +676,13 @@ def draw_gui(state: State, task_mgr: TaskManager) -> None:
             label = metadata.get("label", k)
             hint = metadata.get("hint", "")
             tooltip = metadata.get("tooltip", "")
-            v_changed, v_new = imgui.input_text_with_hint(label, hint, v)
-            if v_changed:
-                state.settings.__dict__[k] = v_new
+            if imgui_object_field_input_text(label, state.settings, k, hint):
                 state.settings_last_edited_time = imgui.get_time()
                 state.settings_saved = False
             if tooltip:
                 imgui.set_item_tooltip(tooltip)
+        if imgui.button("Reset UI dock layout"):
+            state.force_rebuild_dock_layout = True
         imgui.push_style_color(imgui.Col_.text, (1, 1, 1, 0.6))
         imgui.text("(Saved)" if state.settings_saved else "(Waiting)")
         imgui.pop_style_color()
@@ -577,68 +697,131 @@ def draw_gui(state: State, task_mgr: TaskManager) -> None:
         imgui_object_field_input_text("Excercise", state, "excercise", "e.g. Uebung 0")
         imgui_object_field_input_text("Group", state, "group", "e.g. EPR01")
 
-        dock_id = imgui.get_id("MainDock")
-        if state.rebuild_dock_layout:
-            imgui.internal.dock_builder_add_node(dock_id)
-            sp = imgui.internal.dock_builder_split_node(dock_id, imgui.Dir.left, 0.4)
-            imgui.internal.dock_builder_dock_window("Submissions", sp.id_at_dir)
-            imgui.internal.dock_builder_dock_window("Contents", sp.id_at_opposite_dir)
-            imgui.internal.dock_builder_finish(dock_id)
-            state.rebuild_dock_layout = False
-        imgui.dock_space(dock_id)
+    dock_id = imgui.get_id("MainDock")
+    if state.force_rebuild_dock_layout or imgui.internal.dock_builder_get_node(dock_id) is None:
+        imgui.internal.dock_builder_add_node(dock_id)
+        sp = imgui.internal.dock_builder_split_node(dock_id, imgui.Dir.left, 0.4)
+        imgui.internal.dock_builder_dock_window("Submissions", sp.id_at_dir)
+        sp = imgui.internal.dock_builder_split_node(sp.id_at_opposite_dir, imgui.Dir.up, 0.5)
+        imgui.internal.dock_builder_dock_window("Contents", sp.id_at_dir)
+        imgui.internal.dock_builder_dock_window("Code preview", sp.id_at_opposite_dir)
+        imgui.internal.dock_builder_finish(dock_id)
+        state.force_rebuild_dock_layout = False
+    imgui.dock_space(dock_id)
 
-        imgui.begin("Submissions")
+    imgui.begin("Submissions")
+    if state.subms is not None:
         imgui.separator_text(f"{len(state.subms)} submissions")
         for i, s in enumerate(state.subms):
             if imgui.selectable(f"{s.stud_name} ({s.stud_id})", i == state.subm_idx, imgui.SelectableFlags_.select_on_nav)[0]:
                 state.subm_idx = i
                 state.editing_file_info_idx = None
-        imgui.end()
-        imgui.begin("Contents")
-        if state.subm_idx < len(state.subms):
-            subm = state.subms[state.subm_idx]
-            ordered_finfos = state.subm_files_ordered[state.subm_idx]
-            imgui.push_text_wrap_pos()
-            imgui.text(f"Submitter: {subm.stud_name} ({s.stud_id})")
-            imgui.text(f"Submission filename: {"/".join(subm.filename.split("/")[1:])}")
-            imgui.separator_text("Files")
-            imgui.push_item_flag(imgui.ItemFlags_.allow_duplicate_id, True)
-            for i, info in enumerate(ordered_finfos):
-                if state.editing_file_info_idx != i:
-                    imgui.selectable(f"{info.custom_filename} [{info.kind}]", False)
-                    if imgui_is_item_double_clicked():
-                        state.editing_file_info_idx = i
-                        state.focus_editing_file_info = True
-                    imgui.set_item_tooltip(f"Drag to reorder\nDouble-click to edit\nOriginal filename: {info.filename}")
-                    # Hacky-ass dragging code pulled from dearimgui demo. Might break
-                    # when dragging too quickly, but it seems to work well enough.
-                    if imgui.is_item_active() and not imgui.is_item_hovered():
-                        i_next = i + (-1 if imgui.get_mouse_drag_delta(imgui.MouseButton_.left)[1] < 0.0 else 1)
-                        if 0 <= i_next < len(ordered_finfos):
-                            ordered_finfos[i], ordered_finfos[i_next] = \
-                                ordered_finfos[i_next], ordered_finfos[i]
-                            imgui.reset_mouse_drag_delta()
-                else:
-                    any_active = False
-                    cn_changed, cn = imgui.input_text("##CustomFilename", info.custom_filename)
-                    if cn_changed:
-                        info.custom_filename = cn if cn != "" else info.filename
-                    any_active = any_active or imgui.is_item_active()
-                    if state.focus_editing_file_info:
-                        imgui.set_keyboard_focus_here(-1)
-                    imgui.set_item_tooltip("Empty filename to reset")
-                    imgui.same_line()
-                    file_kind_tags: list[str] = ["embed", "separate", "ignore"]
-                    fk_changed, fk = imgui.combo("##Kind", file_kind_tags.index(info.kind), file_kind_tags)
-                    if fk_changed:
-                        info.kind = file_kind_tags[fk]  # ty: ignore[invalid-assignment]
-                    any_active = any_active or imgui.is_item_active()
-                    if not state.focus_editing_file_info and not any_active and imgui.is_window_focused():
-                        state.editing_file_info_idx = None
-                    state.focus_editing_file_info = False
-            imgui.pop_item_flag()
-            imgui.pop_text_wrap_pos()
-        imgui.end()
+        imgui.separator_text("Add manual submission")
+        imgui.set_next_item_width(-imgui.calc_text_size("Submitter name").x)
+        imgui_object_field_input_text("Submitter name", state, "manual_subm_name")
+        imgui.begin_disabled(state.manual_subm_name == "")
+        if imgui.button("Select submission file"):
+            task_mgr.enqueue(Task(_task_open_submission_or_submissions, (state, state.manual_subm_name)))
+        imgui.end_disabled()
+    else:
+        rich_md.push_selectable_text(False)
+        rich_md.render("*No submission archive opened*")
+        rich_md.pop_selectable_text()
+    imgui.end()
+
+    imgui.begin("Contents")
+    if state.subms is not None and state.subm_idx < len(state.subms):
+        subm = state.subms[state.subm_idx]
+        cinfos = state.subm_file_cinfos[subm.stud_id]
+        imgui.push_text_wrap_pos()
+        imgui.text(f"Submitter: {subm.stud_name} ({s.stud_id})")
+        if subm.is_manually_added:
+            subm_filename = subm.filename
+        else:
+            subm_filename = "/".join(subm.filename.split("/")[1:])
+        imgui.text(f"Submission filename: {subm_filename}")
+        if subm.is_manually_added:  # noqa: SIM102
+            if imgui.button("Delete"):
+                imgui.open_popup("Delete submission?")
+        imgui.separator_text("Files")
+        imgui.push_item_flag(imgui.ItemFlags_.allow_duplicate_id, True)
+        for i, info in enumerate(cinfos):
+            if state.editing_file_info_idx != i:
+                imgui.selectable(f"{info.custom_filename} [{info.kind}]", False)
+                if imgui.is_item_clicked():
+                    text = subm.files[info.filename]
+                    if isinstance(text, str):
+                        msgs = set_preview_code(main_state.codeviewer, info.custom_filename, text)
+                        state.lint_current_filename = info.custom_filename
+                        state.lint_messages = msgs
+                if imgui_is_item_double_clicked():
+                    state.editing_file_info_idx = i
+                    state.focus_editing_file_info = True
+                imgui.set_item_tooltip(f"Drag to reorder\nDouble-click to edit\nOriginal filename: {info.filename}")
+                # Hacky-ass dragging code pulled from dearimgui demo. Might break
+                # when dragging too quickly, but it seems to work well enough.
+                if imgui.is_item_active() and not imgui.is_item_hovered():
+                    i_next = i + (-1 if imgui.get_mouse_drag_delta(imgui.MouseButton_.left)[1] < 0.0 else 1)
+                    if 0 <= i_next < len(cinfos):
+                        cinfos[i], cinfos[i_next] = \
+                            cinfos[i_next], cinfos[i]  # noqa: PLR1736
+                        imgui.reset_mouse_drag_delta()
+            else:
+                any_active = False
+                cn_changed, cn = imgui.input_text("##CustomFilename", info.custom_filename)
+                if cn_changed:
+                    info.custom_filename = cn if cn != "" else info.filename
+                any_active = any_active or imgui.is_item_active()
+                if state.focus_editing_file_info:
+                    imgui.set_keyboard_focus_here(-1)
+                imgui.set_item_tooltip("Empty filename to reset")
+                imgui.same_line()
+                file_kind_tags: list[str] = ["embed", "separate", "ignore"]
+                fk_changed, fk = imgui.combo("##Kind", file_kind_tags.index(info.kind), file_kind_tags)
+                if fk_changed:
+                    info.kind = file_kind_tags[fk]  # ty: ignore[invalid-assignment]
+                any_active = any_active or imgui.is_item_active()
+                if not state.focus_editing_file_info and not any_active and imgui.is_window_focused():
+                    state.editing_file_info_idx = None
+                state.focus_editing_file_info = False
+        imgui.pop_item_flag()
+        imgui.pop_text_wrap_pos()
+
+        imgui.set_next_window_pos(imgui.get_main_viewport().get_center(), imgui.Cond_.always, (0.5, 0.5))
+        if imgui.begin_popup_modal("Delete submission?", None, imgui.WindowFlags_.always_auto_resize)[0]:
+            imgui.text(f"Delete submission for {subm.stud_name} ({subm.stud_id})")
+            if imgui.button("Delete", (120, 0)):
+                state.subms.pop(state.subm_idx)
+                imgui.close_current_popup()
+            imgui.set_item_default_focus()
+            imgui.same_line()
+            if imgui.button("Cancel", (120, 0)):
+                imgui.close_current_popup()
+            imgui.end_popup()
+    imgui.end()
+
+    imgui.begin("Code preview")
+    if state.lint_current_filename != "":
+        assert _imgui_font_mono is not None
+        rich_md.render(f"File: {state.lint_current_filename}")
+        if imgui.tree_node("Messages"):
+            imgui.begin_child("##Messages", (0, 100), imgui.ChildFlags_.resize_y)
+            for i, msg in enumerate(state.lint_messages):
+                imgui.push_id(i)
+                label = f"{msg.line}:{msg.column} {msg.msg} ({msg.source} {msg.msg_id})"
+                if imgui_wrapping_clickable(label):
+                    start, end = stylecheck_message_to_cte_doc_pos(msg)
+                    main_state.codeviewer.set_cursor(start)
+                    main_state.codeviewer.select_region(start, end)
+                imgui.pop_id()
+            imgui.end_child()
+            imgui.tree_pop()
+        imgui.push_font(_imgui_font_mono, 0)
+        main_state.codeviewer.render("##Code preview")
+        imgui.pop_font()
+    else:
+        rich_md.render("*No file opened for preview*")
+    imgui.end()
 
     def avail_size_without_button_row() -> tuple[float, float]:
         style = imgui.get_style()
@@ -648,7 +831,6 @@ def draw_gui(state: State, task_mgr: TaskManager) -> None:
 
     def begin_modal_box(name: str, initial_size: tuple[float, float]|None = None) -> bool:
         initial_size = initial_size or (400, 300)
-        style = imgui.get_style()
         imgui.set_next_window_size(initial_size, imgui.Cond_.appearing)
         imgui.set_next_window_pos(imgui.get_main_viewport().get_center(), imgui.Cond_.always, (0.5, 0.5))
         imgui.set_next_window_size_constraints((75, 75), (imgui.FLT_MAX, imgui.FLT_MAX))
@@ -682,7 +864,7 @@ def draw_gui(state: State, task_mgr: TaskManager) -> None:
             rich_md.render(f"``` {tb} ```")
         end_modal_box()
 
-    if state.info_popup:
+    if state.info_popup:  # noqa: SIM102
         if begin_modal_box("Info"):
             rich_md.render(state.info_popup)
             button_labels = []
@@ -737,9 +919,20 @@ def draw_gui(state: State, task_mgr: TaskManager) -> None:
             pass
 
 def main():
+    DEBUG_SAVE_STATE = False
+
     state = State(
         platformdirs.PlatformDirs("eprtool"),
         help_markdown=read_file_str(str(get_res_dir()/"HELP.md")))
+    if DEBUG_SAVE_STATE:
+        print("loading saved state")
+        try:
+            with open("state.pkl", "rb") as f:
+                state = pickle.load(f)
+                assert isinstance(state, State)
+        except FileNotFoundError:
+            pass
+    main_state = MainState(codeviewer=imgui_cte.TextEditor())
     try:
         settings = tomllib.loads(read_file_str(state.settings_path()))
         for k in state.settings.__dict__:
@@ -767,17 +960,37 @@ def main():
                 fps_cnt = 0
                 fps_time = now
 
-        draw_gui(state, task_mgr)
+        draw_gui(state, main_state, task_mgr)
 
     def load_fonts():
         fonts = imgui.get_io().fonts
         fonts.add_font_from_file_ttf(str(get_res_dir()/"DejaVuSans.ttf"), 15)
-        _font_mono = fonts.add_font_from_file_ttf(str(get_res_dir()/"DejaVuSansMono.ttf"), 15)
+        global _imgui_font_mono
+        _imgui_font_mono = fonts.add_font_from_file_ttf(str(get_res_dir()/"DejaVuSansMono.ttf"), 15)
 
     def post_init_ig():
+        if os.name == "nt": # set immersive dark mode
+            from ctypes import wintypes
+
+            import glfw
+            import imgui_bundle.glfw_utils as igglfw
+            DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+            val = ctypes.c_int(1)
+            glfw_win = igglfw.glfw_window_hello_imgui()
+            if glfw_win is not None:
+                win32_win = glfw.get_win32_window(glfw_win)
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    wintypes.HWND(win32_win),
+                    wintypes.DWORD(DWMWA_USE_IMMERSIVE_DARK_MODE),
+                    ctypes.byref(val),
+                    ctypes.sizeof(val)
+                )
         io = imgui.get_io()
         io.config_flags |= imgui.ConfigFlags_.nav_enable_keyboard
         io.config_flags |= imgui.ConfigFlags_.nav_enable_gamepad
+
+    hello_imgui.set_assets_folder(str(get_res_dir()))
+    rich_md.set_assets_folder(str(get_res_dir() / "richmd_assets"))
 
     rp = hello_imgui.RunnerParams()
     rp.imgui_window_params.enable_viewports = True
@@ -786,7 +999,7 @@ def main():
     rp.callbacks.load_additional_fonts = load_fonts
     rp.callbacks.post_init = post_init_ig
     rp.fps_idling = hello_imgui.FpsIdling(5)
-    rp.ini_disable = True
+    rp.ini_filename = os.path.join(state.dirs.user_config_dir, "imgui.ini")
     ap = immapp.AddOnsParams()
     md_opts = rich_md.MarkdownOptions()
     ap.with_markdown = True
@@ -794,6 +1007,11 @@ def main():
     immapp.run(rp, ap)
 
     task_mgr.shutdown()
+
+    if DEBUG_SAVE_STATE:
+        print("saving state")
+        with open("state.pkl", "wb") as f:
+            pickle.dump(state, f)
 
 if __name__ == "__main__":
     mp.freeze_support()
