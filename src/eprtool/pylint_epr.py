@@ -9,7 +9,7 @@ from simplemma import LanguageDetector
 if TYPE_CHECKING:
     from pylint.lint import PyLinter
 
-RE_AUTHOR_VARIABLE = re.compile(r"^\d+, \w+(, \d+, \w+)*$", re.UNICODE)
+RE_AUTHOR_VARIABLE = re.compile(r"^\d+, [\w-]+(, \d+, [\w-]+)*$", re.UNICODE)
 AMBIGUOUS_VARIABLE_NAMES = {"l": "1", "O": "0"}
 
 def is_language_and_not_other(langdet: LanguageDetector, lang: str, text: str) -> tuple[bool, float]:
