@@ -10,6 +10,7 @@ import traceback
 import typing
 import unicodedata
 import zipfile
+import ctypes
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -883,6 +884,22 @@ def main():
         _imgui_font_mono = fonts.add_font_from_file_ttf(str(get_res_dir()/"DejaVuSansMono.ttf"), 15)
 
     def post_init_ig():
+        if os.name == "nt": # set immersive dark mode
+            from ctypes import wintypes
+
+            import glfw
+            import imgui_bundle.glfw_utils as igglfw
+            DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+            val = ctypes.c_int(1)
+            glfw_win = igglfw.glfw_window_hello_imgui()
+            if glfw_win is not None:
+                win32_win = glfw.get_win32_window(glfw_win)
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    wintypes.HWND(win32_win),
+                    wintypes.DWORD(DWMWA_USE_IMMERSIVE_DARK_MODE),
+                    ctypes.byref(val),
+                    ctypes.sizeof(val)
+                )
         io = imgui.get_io()
         io.config_flags |= imgui.ConfigFlags_.nav_enable_keyboard
         io.config_flags |= imgui.ConfigFlags_.nav_enable_gamepad
