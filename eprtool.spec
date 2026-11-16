@@ -16,6 +16,8 @@ def path_re_norm(s: str) -> str:
 exclude_datas = [re.compile(path_re_norm(p)) for p in [
     # Filter out all simplemma language files that aren't German or English (saves ~20MiB)
     r".*/simplemma/strategies/dictionaries/data/(?!(en|de)\.)\w+\.plzma$",
+    # We don't use the default imgui_bundle resources
+    r".*/imgui_bundle/(assets|demos_assets|demos_cpp|demos_python)/.*$",
 ]]
 
 datas = [('src/eprtool/res', 'eprtool/res')]
@@ -64,7 +66,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='__init__',
+    name='eprtool',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -77,4 +79,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=["src/eprtool/res/app_settings/icon.ico"],
 )

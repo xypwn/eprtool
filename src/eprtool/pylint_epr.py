@@ -14,14 +14,14 @@ AMBIGUOUS_VARIABLE_NAMES = {"l": "1", "O": "0"}
 
 def is_language_and_not_other(langdet: LanguageDetector, lang: str, text: str) -> tuple[bool, float]:
     props = langdet.proportion_in_each_language(text)
-    prop = props[lang] if lang in props else 0
+    prop = props.get(lang, 0)
     anti_prop = max(props[k] for k in props if k != lang)
     # constants are arbitrary
     return prop >= 0.9 and not anti_prop >= 0.7, prop-anti_prop
 
 class EprChecker(BaseChecker):
     name = "epr-checker"
-    msgs = {
+    msgs = {  # noqa: RUF012
         "C3301": (
             "Missing __author__ variable",
             "missing-author-variable",
@@ -60,7 +60,8 @@ class EprChecker(BaseChecker):
     }
     options = ()
 
-    def __init__(self, linter: "PyLinter" | None = None) -> None:
+    def __init__(self, linter: PyLinter | None = None) -> None:
+        assert linter is not None
         super().__init__(linter)
         self.langdet = LanguageDetector(("en", "de"))
 
@@ -121,7 +122,7 @@ class EprChecker(BaseChecker):
 
 class EprRawFileChecker(BaseRawFileChecker):
     name = "epr-raw-file-checker"
-    msgs = {
+    msgs = {  # noqa: RUF012
         "C3322": (
             "Likely German comment (confidence: %.2f)",
             "wrong-language-in-comment",
@@ -130,7 +131,8 @@ class EprRawFileChecker(BaseRawFileChecker):
     }
     options = ()
 
-    def __init__(self, linter: "PyLinter" | None = None) -> None:
+    def __init__(self, linter: PyLinter | None = None) -> None:
+        assert linter is not None
         super().__init__(linter)
         self.langdet = LanguageDetector(("en", "de"))
 
@@ -170,7 +172,7 @@ class EprRawFileChecker(BaseRawFileChecker):
                         str_delim = b'"'
                     elif line[i] == ord("'"):
                         str_delim = b"'"
-                    elif line[i] == ord("#"):
+                    elif line[i] == ord("#"):  # noqa: SIM102
                         if curr_str_delim is None:
                             self._visit_comment(line[i+1:].decode("utf-8", errors="ignore"), line_idx+1, i+1, len(line))
                     if str_delim is not None:
@@ -179,6 +181,6 @@ class EprRawFileChecker(BaseRawFileChecker):
                     else:
                         i += 1
 
-def register(linter: "PyLinter") -> None:
+def register(linter: PyLinter) -> None:
     linter.register_checker(EprChecker(linter))
     linter.register_checker(EprRawFileChecker(linter))

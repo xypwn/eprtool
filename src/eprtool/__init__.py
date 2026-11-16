@@ -1,16 +1,8 @@
-import copy
-import ctypes
-import dataclasses
-import io
 import multiprocessing as mp
-import multiprocessing.pool as mpp
 import multiprocessing.queues as mpq
-import multiprocessing.sharedctypes as mpsct
 import os
-import pkgutil
 import queue
 import re
-import struct
 import sys
 import time
 import tomllib
@@ -24,12 +16,12 @@ from pathlib import Path
 import chardet
 import crossfiledialog
 import platformdirs
-import pycodestyle
-import pylint.lint
 import tomli_w
 import typst
-from imgui_bundle import hello_imgui, imgui, immapp, rich_md
+from imgui_bundle import hello_imgui, imgui, imgui_color_text_edit, immapp, rich_md
 from showinfm import show_in_file_manager
+
+from eprtool import stylecheck
 
 TYPST_PRELUDE = """
 #import "@preview/codly:2.0.0" as codly
@@ -92,7 +84,7 @@ def read_file_str(path: str|Path) -> str:
 
 def get_res_dir() -> Path:
     if getattr(sys, "frozen", False):
-        return Path(getattr(sys, "_MEIPASS"))/"eprtool"/"res"
+        return Path(getattr(sys, "_MEIPASS"))/"eprtool"/"res"  # noqa: B009
     else:
         return Path(__file__).parent/"res"
 
@@ -129,9 +121,6 @@ def imgui_align_button_row(labels: typing.Iterable[str], align: typing.Literal["
             cx -= width/2
     imgui.set_cursor_screen_pos((cx, cy))
 
-def default_field(x):
-    return dataclasses.field(default_factory=lambda: copy.deepcopy(x))
-
 TYPST_IMAGE_FORMATS = {
     ".png": "png",
     ".jpg": "jpg",
@@ -156,9 +145,9 @@ RE_SUBMISSION_FILE = re.compile(r"^(?P<name>[^ ]+ [^_]+)_(?P<id>\d+)_assignsubmi
 
 @dataclass
 class SubmissionFilesResult:
-    submissions: list[SingleSubmission] = default_field([])
-    skipped_files: list[str] = default_field([])
-    unrecognized_files: list[str] = default_field([])
+    submissions: list[SingleSubmission] = field(default_factory=list)
+    skipped_files: list[str] = field(default_factory=list)
+    unrecognized_files: list[str] = field(default_factory=list)
 
 # Submission may be ZIP or single file
 def submission_files_from_zip_or_file(filename: str, stud_name_if_single_subm_file: str|None = None) -> SubmissionFilesResult:
@@ -256,22 +245,23 @@ class Settings:
     group_tutor: str = field(default="", metadata={"label": "Group and tutor", "hint": "e.g. EPR01 - Firstname"})
     pdf_suffix: str = field(default="_kommentiert", metadata={"label": "PDF suffix", "tooltip": "E.g. for xournalpp: German -> _kommentiert, English -> _annotated"})
 
-# State that can be passed to tasks
 @dataclass
 class State:
+    """State that can be passed to tasks
+    """
     dirs: platformdirs.PlatformDirsABC
 
-    rebuild_dock_layout = True
+    force_rebuild_dock_layout = False
 
     subms: list[SingleSubmission]|None = None
     subm_idx: int = 0
-    subm_file_cinfos: dict[str, list[SubmissionFileInfo]] = default_field([]) # id to custom file infos
+    subm_file_cinfos: dict[str, list[SubmissionFileInfo]] = field(default_factory=dict) # id to custom file infos
     excercise: str = ""
     group: str = ""
 
     manual_subm_name: str = ""
 
-    editing_file_info_idx: int|None = None
+    editing_file_info_idx: int | None = None
     focus_editing_file_info: bool = False
 
     last_exported_folder: str = ""
@@ -280,7 +270,7 @@ class State:
     info_popup_show_file: str = ""
     info_popup_show_folder: str = ""
 
-    settings: Settings = default_field(Settings())
+    settings: Settings = field(default_factory=Settings)
     settings_saved: bool = True
     settings_last_edited_time: float = 0
 
@@ -288,6 +278,12 @@ class State:
 
     def settings_path(self) -> str:
         return os.path.join(self.dirs.user_config_dir, "settings.toml")
+
+@dataclass
+class MainState:
+    """State that is only accessible to the main process
+    """
+    codeviewer: imgui_color_text_edit.TextEditor
 
 @dataclass
 class Status:
@@ -563,7 +559,7 @@ def _task_pack_feedback_zip(ctx: Context, state: State) -> State:
 
     return state
 
-def draw_gui(state: State, task_mgr: TaskManager) -> None:
+def draw_gui(state: State, main_state: MainState, task_mgr: TaskManager) -> None:
     imgui.begin_disabled(task_mgr.working)
     if imgui.button("Open submission ZIP"):
         task_mgr.enqueue(Task(_task_open_submission_or_submissions, (state, None)))
@@ -598,6 +594,8 @@ def draw_gui(state: State, task_mgr: TaskManager) -> None:
                 state.settings_saved = False
             if tooltip:
                 imgui.set_item_tooltip(tooltip)
+        if imgui.button("Reset UI dock layout"):
+            state.force_rebuild_dock_layout = True
         imgui.push_style_color(imgui.Col_.text, (1, 1, 1, 0.6))
         imgui.text("(Saved)" if state.settings_saved else "(Waiting)")
         imgui.pop_style_color()
@@ -612,17 +610,20 @@ def draw_gui(state: State, task_mgr: TaskManager) -> None:
         imgui_object_field_input_text("Excercise", state, "excercise", "e.g. Uebung 0")
         imgui_object_field_input_text("Group", state, "group", "e.g. EPR01")
 
-        dock_id = imgui.get_id("MainDock")
-        if state.rebuild_dock_layout:
-            imgui.internal.dock_builder_add_node(dock_id)
-            sp = imgui.internal.dock_builder_split_node(dock_id, imgui.Dir.left, 0.4)
-            imgui.internal.dock_builder_dock_window("Submissions", sp.id_at_dir)
-            imgui.internal.dock_builder_dock_window("Contents", sp.id_at_opposite_dir)
-            imgui.internal.dock_builder_finish(dock_id)
-            state.rebuild_dock_layout = False
-        imgui.dock_space(dock_id)
+    dock_id = imgui.get_id("MainDock")
+    if state.force_rebuild_dock_layout or imgui.internal.dock_builder_get_node(dock_id) is None:
+        imgui.internal.dock_builder_add_node(dock_id)
+        sp = imgui.internal.dock_builder_split_node(dock_id, imgui.Dir.left, 0.4)
+        imgui.internal.dock_builder_dock_window("Submissions", sp.id_at_dir)
+        sp = imgui.internal.dock_builder_split_node(sp.id_at_opposite_dir, imgui.Dir.up, 0.5)
+        imgui.internal.dock_builder_dock_window("Contents", sp.id_at_dir)
+        imgui.internal.dock_builder_dock_window("Code preview", sp.id_at_opposite_dir)
+        imgui.internal.dock_builder_finish(dock_id)
+        state.force_rebuild_dock_layout = False
+    imgui.dock_space(dock_id)
 
-        imgui.begin("Submissions")
+    imgui.begin("Submissions")
+    if state.subms is not None:
         imgui.separator_text(f"{len(state.subms)} submissions")
         for i, s in enumerate(state.subms):
             if imgui.selectable(f"{s.stud_name} ({s.stud_id})", i == state.subm_idx, imgui.SelectableFlags_.select_on_nav)[0]:
@@ -635,71 +636,116 @@ def draw_gui(state: State, task_mgr: TaskManager) -> None:
         if imgui.button("Select submission file"):
             task_mgr.enqueue(Task(_task_open_submission_or_submissions, (state, state.manual_subm_name)))
         imgui.end_disabled()
-        imgui.end()
-        imgui.begin("Contents")
-        if state.subm_idx < len(state.subms):
-            subm = state.subms[state.subm_idx]
-            cinfos = state.subm_file_cinfos[subm.stud_id]
-            imgui.push_text_wrap_pos()
-            imgui.text(f"Submitter: {subm.stud_name} ({s.stud_id})")
-            if subm.is_manually_added:
-                subm_filename = subm.filename
-            else:
-                subm_filename = "/".join(subm.filename.split("/")[1:])
-            imgui.text(f"Submission filename: {subm_filename}")
-            if subm.is_manually_added:
-                if imgui.button("Delete"):
-                    imgui.open_popup("Delete submission?")
-            imgui.separator_text("Files")
-            imgui.push_item_flag(imgui.ItemFlags_.allow_duplicate_id, True)
-            for i, info in enumerate(cinfos):
-                if state.editing_file_info_idx != i:
-                    imgui.selectable(f"{info.custom_filename} [{info.kind}]", False)
-                    if imgui_is_item_double_clicked():
-                        state.editing_file_info_idx = i
-                        state.focus_editing_file_info = True
-                    imgui.set_item_tooltip(f"Drag to reorder\nDouble-click to edit\nOriginal filename: {info.filename}")
-                    # Hacky-ass dragging code pulled from dearimgui demo. Might break
-                    # when dragging too quickly, but it seems to work well enough.
-                    if imgui.is_item_active() and not imgui.is_item_hovered():
-                        i_next = i + (-1 if imgui.get_mouse_drag_delta(imgui.MouseButton_.left)[1] < 0.0 else 1)
-                        if 0 <= i_next < len(cinfos):
-                            cinfos[i], cinfos[i_next] = \
-                                cinfos[i_next], cinfos[i]
-                            imgui.reset_mouse_drag_delta()
-                else:
-                    any_active = False
-                    cn_changed, cn = imgui.input_text("##CustomFilename", info.custom_filename)
-                    if cn_changed:
-                        info.custom_filename = cn if cn != "" else info.filename
-                    any_active = any_active or imgui.is_item_active()
-                    if state.focus_editing_file_info:
-                        imgui.set_keyboard_focus_here(-1)
-                    imgui.set_item_tooltip("Empty filename to reset")
-                    imgui.same_line()
-                    file_kind_tags: list[str] = ["embed", "separate", "ignore"]
-                    fk_changed, fk = imgui.combo("##Kind", file_kind_tags.index(info.kind), file_kind_tags)
-                    if fk_changed:
-                        info.kind = file_kind_tags[fk]  # ty: ignore[invalid-assignment]
-                    any_active = any_active or imgui.is_item_active()
-                    if not state.focus_editing_file_info and not any_active and imgui.is_window_focused():
-                        state.editing_file_info_idx = None
-                    state.focus_editing_file_info = False
-            imgui.pop_item_flag()
-            imgui.pop_text_wrap_pos()
+    else:
+        rich_md.push_selectable_text(False)
+        rich_md.render("*No submission archive opened*")
+        rich_md.pop_selectable_text()
+    imgui.end()
 
-            imgui.set_next_window_pos(imgui.get_main_viewport().get_center(), imgui.Cond_.always, (0.5, 0.5))
-            if imgui.begin_popup_modal("Delete submission?", None, imgui.WindowFlags_.always_auto_resize)[0]:
-                imgui.text(f"Delete submission for {subm.stud_name} ({subm.stud_id})")
-                if imgui.button("Delete", (120, 0)):
-                    state.subms.pop(state.subm_idx)
-                    imgui.close_current_popup()
-                imgui.set_item_default_focus()
+    imgui.begin("Contents")
+    if state.subms is not None and state.subm_idx < len(state.subms):
+        subm = state.subms[state.subm_idx]
+        cinfos = state.subm_file_cinfos[subm.stud_id]
+        imgui.push_text_wrap_pos()
+        imgui.text(f"Submitter: {subm.stud_name} ({s.stud_id})")
+        if subm.is_manually_added:
+            subm_filename = subm.filename
+        else:
+            subm_filename = "/".join(subm.filename.split("/")[1:])
+        imgui.text(f"Submission filename: {subm_filename}")
+        if subm.is_manually_added:
+            if imgui.button("Delete"):
+                imgui.open_popup("Delete submission?")
+        imgui.separator_text("Files")
+        imgui.push_item_flag(imgui.ItemFlags_.allow_duplicate_id, True)
+        for i, info in enumerate(cinfos):
+            if state.editing_file_info_idx != i:
+                imgui.selectable(f"{info.custom_filename} [{info.kind}]", False)
+                if imgui_is_item_double_clicked():
+                    state.editing_file_info_idx = i
+                    state.focus_editing_file_info = True
+                if imgui.is_item_clicked(imgui.MouseButton_.right):
+                    main_state.codeviewer.set_language(imgui_color_text_edit.TextEditor.Language.python())
+                    text = subm.files[info.filename]
+                    assert isinstance(text, str)
+                    main_state.codeviewer.set_text(text)
+                    main_state.codeviewer.set_read_only_enabled(True)
+                    msgs = stylecheck.check(info.custom_filename, text.encode("utf-8"))
+                    for msg in msgs:
+                        DocPos = imgui_color_text_edit.TextEditor.DocPos
+                        line, column = max(msg.line - 1, 0), max(msg.column - 1, 0)
+                        start = DocPos(line, column)
+                        if msg.end_line is not None:
+                            end_line = msg.end_line - 1
+                        else:
+                            end_line = line
+                        if msg.end_column is not None:
+                            end_column = msg.end_column - 1
+                        else:
+                            end_column = column + 1
+                        end = DocPos(end_line, end_column)
+                        error_bg = imgui.IM_COL32(220, 50, 50, 56)
+                        error_fg = imgui.IM_COL32(220, 50, 50, 255)
+                        warn_bg = imgui.IM_COL32(180, 140, 0, 48)
+                        warn_fg = imgui.IM_COL32(180, 140, 0, 255)
+                        main_state.codeviewer.add_squiggle(
+                            start,
+                            end,
+                            2,
+                            warn_fg,
+                            msg.msg)
+                        main_state.codeviewer.add_marker(line,
+                            warn_fg, warn_bg,
+                            "warning", "")
+                imgui.set_item_tooltip(f"Drag to reorder\nDouble-click to edit\nOriginal filename: {info.filename}")
+                # Hacky-ass dragging code pulled from dearimgui demo. Might break
+                # when dragging too quickly, but it seems to work well enough.
+                if imgui.is_item_active() and not imgui.is_item_hovered():
+                    i_next = i + (-1 if imgui.get_mouse_drag_delta(imgui.MouseButton_.left)[1] < 0.0 else 1)
+                    if 0 <= i_next < len(cinfos):
+                        cinfos[i], cinfos[i_next] = \
+                            cinfos[i_next], cinfos[i]
+                        imgui.reset_mouse_drag_delta()
+            else:
+                any_active = False
+                cn_changed, cn = imgui.input_text("##CustomFilename", info.custom_filename)
+                if cn_changed:
+                    info.custom_filename = cn if cn != "" else info.filename
+                any_active = any_active or imgui.is_item_active()
+                if state.focus_editing_file_info:
+                    imgui.set_keyboard_focus_here(-1)
+                imgui.set_item_tooltip("Empty filename to reset")
                 imgui.same_line()
-                if imgui.button("Cancel", (120, 0)):
-                    imgui.close_current_popup()
-                imgui.end_popup()
-        imgui.end()
+                file_kind_tags: list[str] = ["embed", "separate", "ignore"]
+                fk_changed, fk = imgui.combo("##Kind", file_kind_tags.index(info.kind), file_kind_tags)
+                if fk_changed:
+                    info.kind = file_kind_tags[fk]  # ty: ignore[invalid-assignment]
+                any_active = any_active or imgui.is_item_active()
+                if not state.focus_editing_file_info and not any_active and imgui.is_window_focused():
+                    state.editing_file_info_idx = None
+                state.focus_editing_file_info = False
+        imgui.pop_item_flag()
+        imgui.pop_text_wrap_pos()
+
+        imgui.set_next_window_pos(imgui.get_main_viewport().get_center(), imgui.Cond_.always, (0.5, 0.5))
+        if imgui.begin_popup_modal("Delete submission?", None, imgui.WindowFlags_.always_auto_resize)[0]:
+            imgui.text(f"Delete submission for {subm.stud_name} ({subm.stud_id})")
+            if imgui.button("Delete", (120, 0)):
+                state.subms.pop(state.subm_idx)
+                imgui.close_current_popup()
+            imgui.set_item_default_focus()
+            imgui.same_line()
+            if imgui.button("Cancel", (120, 0)):
+                imgui.close_current_popup()
+            imgui.end_popup()
+    imgui.end()
+
+    imgui.begin("Code preview")
+    assert _imgui_font_mono is not None
+    imgui.push_font(_imgui_font_mono, 0)
+    main_state.codeviewer.render("##Code preview")
+    imgui.pop_font()
+    imgui.end()
 
     def avail_size_without_button_row() -> tuple[float, float]:
         style = imgui.get_style()
@@ -797,47 +843,10 @@ def draw_gui(state: State, task_mgr: TaskManager) -> None:
             pass
 
 def main():
-    """
-    def get_epr_lint_message_ids() -> list[str]:
-        import eprtool.epr_lint
-        msgs = eprtool.epr_lint.EprChecker.msgs | eprtool.epr_lint.EprRawFileChecker.msgs
-        return list(msgs.keys())
-
-    message_ids = get_epr_lint_message_ids()+[
-        "C0103", # invalid-name
-        "C0112", # empty-docstring
-        "C0114", # missing-module-docstring
-        "C0115", # missing-class-docstring
-        "C0116", # missing-function-docstring
-        "C0198", # bad-docstring-quotes
-        "C0199", # docstring-first-line-empty
-        #"C0301", # line-too-long
-        "C0410", # multiple-imports
-        "C0411", # wrong-import-order
-        "C0412", # ungrouped-imports
-        "C0413", # wrong-import-position
-        "C2401", # non-ascii-name
-        "C2701", # import-private-name
-        "W3201", # bad-dunder-name
-        "E",
-        "W",
-    ]
-    print("running pylint...")
-    pylint.lint.Run(("--load-plugins=eprtool.epr_lint,pylint.extensions.docstyle,pylint.extensions.dunder,pylint.extensions.private_import",
-        "--disable=all",
-        "--enable="+",".join(message_ids),
-        "--output-format=json2",
-        "example.py"), exit=False)
-    print("done running pylint")
-
-    style_guide = pycodestyle.StyleGuide()
-    print("pycodestyle:", style_guide.input_file("example.py"))
-    return
-    """
-
     state = State(
         platformdirs.PlatformDirs("eprtool"),
         help_markdown=read_file_str(str(get_res_dir()/"HELP.md")))
+    main_state = MainState(codeviewer=imgui_color_text_edit.TextEditor())
     try:
         settings = tomllib.loads(read_file_str(state.settings_path()))
         for k in state.settings.__dict__:
@@ -865,17 +874,21 @@ def main():
                 fps_cnt = 0
                 fps_time = now
 
-        draw_gui(state, task_mgr)
+        draw_gui(state, main_state, task_mgr)
 
     def load_fonts():
         fonts = imgui.get_io().fonts
         fonts.add_font_from_file_ttf(str(get_res_dir()/"DejaVuSans.ttf"), 15)
-        _font_mono = fonts.add_font_from_file_ttf(str(get_res_dir()/"DejaVuSansMono.ttf"), 15)
+        global _imgui_font_mono
+        _imgui_font_mono = fonts.add_font_from_file_ttf(str(get_res_dir()/"DejaVuSansMono.ttf"), 15)
 
     def post_init_ig():
         io = imgui.get_io()
         io.config_flags |= imgui.ConfigFlags_.nav_enable_keyboard
         io.config_flags |= imgui.ConfigFlags_.nav_enable_gamepad
+
+    hello_imgui.set_assets_folder(str(get_res_dir()))
+    rich_md.set_assets_folder(str(get_res_dir() / "richmd_assets"))
 
     rp = hello_imgui.RunnerParams()
     rp.imgui_window_params.enable_viewports = True
@@ -884,7 +897,7 @@ def main():
     rp.callbacks.load_additional_fonts = load_fonts
     rp.callbacks.post_init = post_init_ig
     rp.fps_idling = hello_imgui.FpsIdling(5)
-    rp.ini_disable = True
+    rp.ini_filename = os.path.join(state.dirs.user_config_dir, "imgui.ini")
     ap = immapp.AddOnsParams()
     md_opts = rich_md.MarkdownOptions()
     ap.with_markdown = True
