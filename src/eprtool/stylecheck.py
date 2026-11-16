@@ -4,7 +4,6 @@
 import contextlib
 import io
 import sys
-import time
 import typing
 from dataclasses import dataclass
 
@@ -132,7 +131,7 @@ def check(filename: str, file_data: bytes | None = None) -> list[Message]:
         msgs += [Message.from_pylint(msg) for msg in reporter.messages]
 
     with context_stdin(file_data):
-        style_guide = pycodestyle.StyleGuide(quiet=True)
+        style_guide = pycodestyle.StyleGuide(quiet=True, max_line_length=99)
         report = style_guide.init_report(_PEP8MessageReport)
         assert isinstance(report, _PEP8MessageReport)
         report.override_filename = filename

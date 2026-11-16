@@ -1,6 +1,8 @@
+import ctypes
 import multiprocessing as mp
 import multiprocessing.queues as mpq
 import os
+import pickle
 import queue
 import re
 import sys
@@ -10,7 +12,6 @@ import traceback
 import typing
 import unicodedata
 import zipfile
-import ctypes
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -19,7 +20,8 @@ import crossfiledialog
 import platformdirs
 import tomli_w
 import typst
-from imgui_bundle import hello_imgui, imgui, imgui_color_text_edit, immapp, rich_md
+from imgui_bundle import hello_imgui, imgui, immapp, rich_md
+from imgui_bundle import imgui_color_text_edit as imgui_cte
 from showinfm import show_in_file_manager
 
 from eprtool import stylecheck
@@ -122,6 +124,42 @@ def imgui_align_button_row(labels: typing.Iterable[str], align: typing.Literal["
             cx -= width/2
     imgui.set_cursor_screen_pos((cx, cy))
 
+def imgui_wrapping_clickable(label: str) -> bool:
+    """Somewhat of a mix of button and selectable for wrapping text
+    """
+    imgui.push_id(label)
+    style = imgui.get_style()
+    spacing = style.item_spacing/2
+    imgui.push_style_var_y(imgui.StyleVar_.item_spacing, 0.0)
+    imgui.push_style_var(imgui.StyleVar_.frame_rounding, 0)
+
+    def calc_bb(label: str) -> imgui.internal.ImRect:
+        avail = imgui.get_content_region_avail()
+        pos = imgui.get_cursor_screen_pos()
+        size = imgui.calc_text_size(label, wrap_width=avail.x)
+        size.x = avail.x
+        return imgui.internal.ImRect(
+            pos.x - spacing.x,          pos.y,
+            pos.x + size.x + spacing.x, pos.y + size.y + 2*spacing.y,
+        )
+
+    bb = calc_bb(label) # bounding box
+    imgui.set_cursor_screen_pos(bb.min)
+    clicked = imgui.invisible_button("##btn", bb.get_size(), imgui.ButtonFlags_.enable_nav)
+    if imgui.is_item_hovered():
+        bg = imgui.get_color_u32(imgui.Col_.frame_bg_hovered)
+    else:
+        bg = imgui.get_color_u32((0, 0, 0, 0))
+    imgui.get_window_draw_list().add_rect_filled(bb.min, bb.max, bg)
+    imgui.set_cursor_screen_pos(bb.min + spacing)
+    imgui.text_wrapped(label)
+    imgui.set_cursor_screen_pos((bb.min.x + spacing.x, bb.max.y))
+
+    imgui.pop_style_var()
+    imgui.pop_style_var()
+    imgui.pop_id()
+    return clicked
+
 TYPST_IMAGE_FORMATS = {
     ".png": "png",
     ".jpg": "jpg",
@@ -164,7 +202,7 @@ def submission_files_from_zip_or_file(filename: str, stud_name_if_single_subm_fi
     def submission_file_to_files(submission_filename: str, inp: typing.IO[bytes]) -> dict[str, str|bytes]:
         def file_to_str_or_bytes(filename: str, f: typing.IO[bytes]) -> str|bytes|None:
             ext = os.path.splitext(filename)[1].lower()
-            if ext == ".py":
+            if ext == ".py":  # noqa: SIM114
                 is_text = True
             elif os.path.basename(filename).lower() in ("readme", "readme.md", "readme.txt"):
                 is_text = True
@@ -267,6 +305,9 @@ class State:
 
     last_exported_folder: str = ""
 
+    lint_current_filename: str = ""
+    lint_messages: list[stylecheck.Message] = field(default_factory=list)
+
     info_popup: str = ""
     info_popup_show_file: str = ""
     info_popup_show_folder: str = ""
@@ -284,7 +325,7 @@ class State:
 class MainState:
     """State that is only accessible to the main process
     """
-    codeviewer: imgui_color_text_edit.TextEditor
+    codeviewer: imgui_cte.TextEditor
 
 @dataclass
 class Status:
@@ -320,7 +361,7 @@ def _task_worker(ctx: Context, taskq: mp.Queue[Task|Stop], resq: mp.Queue[State|
         try:
             res = task.fn(*([ctx]+list(task.args)))
             ok = True
-        except BaseException as e:
+        except BaseException as e:  # noqa: BLE001
             resq.put(TaskException(e))
         if ok:
             assert isinstance(res, State|None)
@@ -479,7 +520,7 @@ def _task_export_to_feedback_folder(ctx: Context, state: State) -> State:
                 ext = os.path.splitext(finfo.custom_filename)[1].lower()
                 if isinstance(fdata, str):
                     lang = "py"
-                    if not ext == ".py":
+                    if ext != ".py":
                         lang = "md" # TODO: more precise guessing
                     code += f"#codly.new(```{lang}\n{fdata}\n```)\n"
                 else:
@@ -555,10 +596,55 @@ def _task_pack_feedback_zip(ctx: Context, state: State) -> State:
     state.info_popup = ""
     if packed_files != total_files:
         state.info_popup += f"> [!WARNING]\n> Found {total_files-packed_files}/{total_files} unannotated PDFs!\n\n"
-    state.info_popup += f"Successfully added feedback ZIP to folder."
+    state.info_popup += "Successfully added feedback ZIP to folder."
     state.info_popup_show_file = zip_path
 
     return state
+
+def stylecheck_message_to_cte_doc_pos(msg: stylecheck.Message) -> tuple[imgui_cte.TextEditor.DocPos, imgui_cte.TextEditor.DocPos]:
+    DocPos = imgui_cte.TextEditor.DocPos
+    line, column = max(msg.line - 1, 0), max(msg.column - 1, 0)
+    start = DocPos(line, column)
+    if msg.end_line is not None:
+        end_line = msg.end_line - 1
+    else:
+        end_line = line
+    if msg.end_column is not None:
+        end_column = msg.end_column - 1
+    else:
+        end_column = column + 1
+    end = DocPos(end_line, end_column)
+    return start, end
+
+def set_preview_code(codeviewer: imgui_cte.TextEditor, filename: str, code: str) -> list[stylecheck.Message]:
+    ext = os.path.splitext(filename)[1].lower()
+    match ext:
+        case ".py":
+            codeviewer.set_language(imgui_cte.TextEditor.Language.python())
+        case _:
+            # There's a bug, so we use markdown as default for now.
+            # See https://github.com/pthom/imgui_bundle/issues/512.
+            codeviewer.set_language(imgui_cte.TextEditor.Language.markdown())
+    codeviewer.set_text(code)
+    codeviewer.set_read_only_enabled(True)
+    codeviewer.set_show_mini_map_enabled(True)
+    msgs = stylecheck.check(filename, code.encode("utf-8"))
+    for msg in msgs:
+        start, end = stylecheck_message_to_cte_doc_pos(msg)
+        error_bg = imgui.IM_COL32(220, 50, 50, 56)
+        error_fg = imgui.IM_COL32(220, 50, 50, 255)
+        warn_bg = imgui.IM_COL32(180, 140, 0, 48)
+        warn_fg = imgui.IM_COL32(180, 140, 0, 255)
+        codeviewer.add_squiggle(
+            start,
+            end,
+            2,
+            warn_fg,
+            f"{msg.msg} ({msg.source} {msg.msg_id})")
+        codeviewer.add_marker(start.line,
+            warn_fg, warn_bg,
+            "warning", "")
+    return msgs
 
 def draw_gui(state: State, main_state: MainState, task_mgr: TaskManager) -> None:
     imgui.begin_disabled(task_mgr.working)
@@ -654,7 +740,7 @@ def draw_gui(state: State, main_state: MainState, task_mgr: TaskManager) -> None
         else:
             subm_filename = "/".join(subm.filename.split("/")[1:])
         imgui.text(f"Submission filename: {subm_filename}")
-        if subm.is_manually_added:
+        if subm.is_manually_added:  # noqa: SIM102
             if imgui.button("Delete"):
                 imgui.open_popup("Delete submission?")
         imgui.separator_text("Files")
@@ -662,42 +748,15 @@ def draw_gui(state: State, main_state: MainState, task_mgr: TaskManager) -> None
         for i, info in enumerate(cinfos):
             if state.editing_file_info_idx != i:
                 imgui.selectable(f"{info.custom_filename} [{info.kind}]", False)
+                if imgui.is_item_clicked():
+                    text = subm.files[info.filename]
+                    if isinstance(text, str):
+                        msgs = set_preview_code(main_state.codeviewer, info.custom_filename, text)
+                        state.lint_current_filename = info.custom_filename
+                        state.lint_messages = msgs
                 if imgui_is_item_double_clicked():
                     state.editing_file_info_idx = i
                     state.focus_editing_file_info = True
-                if imgui.is_item_clicked(imgui.MouseButton_.right):
-                    main_state.codeviewer.set_language(imgui_color_text_edit.TextEditor.Language.python())
-                    text = subm.files[info.filename]
-                    assert isinstance(text, str)
-                    main_state.codeviewer.set_text(text)
-                    main_state.codeviewer.set_read_only_enabled(True)
-                    msgs = stylecheck.check(info.custom_filename, text.encode("utf-8"))
-                    for msg in msgs:
-                        DocPos = imgui_color_text_edit.TextEditor.DocPos
-                        line, column = max(msg.line - 1, 0), max(msg.column - 1, 0)
-                        start = DocPos(line, column)
-                        if msg.end_line is not None:
-                            end_line = msg.end_line - 1
-                        else:
-                            end_line = line
-                        if msg.end_column is not None:
-                            end_column = msg.end_column - 1
-                        else:
-                            end_column = column + 1
-                        end = DocPos(end_line, end_column)
-                        error_bg = imgui.IM_COL32(220, 50, 50, 56)
-                        error_fg = imgui.IM_COL32(220, 50, 50, 255)
-                        warn_bg = imgui.IM_COL32(180, 140, 0, 48)
-                        warn_fg = imgui.IM_COL32(180, 140, 0, 255)
-                        main_state.codeviewer.add_squiggle(
-                            start,
-                            end,
-                            2,
-                            warn_fg,
-                            msg.msg)
-                        main_state.codeviewer.add_marker(line,
-                            warn_fg, warn_bg,
-                            "warning", "")
                 imgui.set_item_tooltip(f"Drag to reorder\nDouble-click to edit\nOriginal filename: {info.filename}")
                 # Hacky-ass dragging code pulled from dearimgui demo. Might break
                 # when dragging too quickly, but it seems to work well enough.
@@ -705,7 +764,7 @@ def draw_gui(state: State, main_state: MainState, task_mgr: TaskManager) -> None
                     i_next = i + (-1 if imgui.get_mouse_drag_delta(imgui.MouseButton_.left)[1] < 0.0 else 1)
                     if 0 <= i_next < len(cinfos):
                         cinfos[i], cinfos[i_next] = \
-                            cinfos[i_next], cinfos[i]
+                            cinfos[i_next], cinfos[i]  # noqa: PLR1736
                         imgui.reset_mouse_drag_delta()
             else:
                 any_active = False
@@ -742,10 +801,26 @@ def draw_gui(state: State, main_state: MainState, task_mgr: TaskManager) -> None
     imgui.end()
 
     imgui.begin("Code preview")
-    assert _imgui_font_mono is not None
-    imgui.push_font(_imgui_font_mono, 0)
-    main_state.codeviewer.render("##Code preview")
-    imgui.pop_font()
+    if state.lint_current_filename != "":
+        assert _imgui_font_mono is not None
+        rich_md.render(f"File: {state.lint_current_filename}")
+        if imgui.tree_node("Messages"):
+            imgui.begin_child("##Messages", (0, 100), imgui.ChildFlags_.resize_y)
+            for i, msg in enumerate(state.lint_messages):
+                imgui.push_id(i)
+                label = f"{msg.line}:{msg.column} {msg.msg} ({msg.source} {msg.msg_id})"
+                if imgui_wrapping_clickable(label):
+                    start, end = stylecheck_message_to_cte_doc_pos(msg)
+                    main_state.codeviewer.set_cursor(start)
+                    main_state.codeviewer.select_region(start, end)
+                imgui.pop_id()
+            imgui.end_child()
+            imgui.tree_pop()
+        imgui.push_font(_imgui_font_mono, 0)
+        main_state.codeviewer.render("##Code preview")
+        imgui.pop_font()
+    else:
+        rich_md.render("*No file opened for preview*")
     imgui.end()
 
     def avail_size_without_button_row() -> tuple[float, float]:
@@ -789,7 +864,7 @@ def draw_gui(state: State, main_state: MainState, task_mgr: TaskManager) -> None
             rich_md.render(f"``` {tb} ```")
         end_modal_box()
 
-    if state.info_popup:
+    if state.info_popup:  # noqa: SIM102
         if begin_modal_box("Info"):
             rich_md.render(state.info_popup)
             button_labels = []
@@ -844,10 +919,20 @@ def draw_gui(state: State, main_state: MainState, task_mgr: TaskManager) -> None
             pass
 
 def main():
+    DEBUG_SAVE_STATE = False
+
     state = State(
         platformdirs.PlatformDirs("eprtool"),
         help_markdown=read_file_str(str(get_res_dir()/"HELP.md")))
-    main_state = MainState(codeviewer=imgui_color_text_edit.TextEditor())
+    if DEBUG_SAVE_STATE:
+        print("loading saved state")
+        try:
+            with open("state.pkl", "rb") as f:
+                state = pickle.load(f)
+                assert isinstance(state, State)
+        except FileNotFoundError:
+            pass
+    main_state = MainState(codeviewer=imgui_cte.TextEditor())
     try:
         settings = tomllib.loads(read_file_str(state.settings_path()))
         for k in state.settings.__dict__:
@@ -922,6 +1007,11 @@ def main():
     immapp.run(rp, ap)
 
     task_mgr.shutdown()
+
+    if DEBUG_SAVE_STATE:
+        print("saving state")
+        with open("state.pkl", "wb") as f:
+            pickle.dump(state, f)
 
 if __name__ == "__main__":
     mp.freeze_support()
