@@ -10,6 +10,10 @@ if TYPE_CHECKING:
     from pylint.lint import PyLinter
 
 RE_AUTHOR_VARIABLE = re.compile(r"^\d+, [\w-]+(, \d+, [\w-]+)*$", re.UNICODE)
+RE_AI_USAGE_COMMENT = re.compile(r"^# ?(generated|made) (with|without) (support of )?AI.*$", re.UNICODE|re.IGNORECASE)
+# FIXME: Doesn't detect if string delims match.
+# TODO: Decide if accepting any credits is good enough or if the string must contain specific elements.
+RE_AI_USAGE_CREDITS = re.compile(r"^__credits__\s+=\s+[\"\'].+[\"\']\s*$", re.UNICODE)
 AMBIGUOUS_VARIABLE_NAMES = {"l": "1", "O": "0"}
 
 def is_language_and_not_other(langdet: LanguageDetector, lang: str, text: str) -> tuple[bool, float]:
@@ -128,6 +132,11 @@ class EprRawFileChecker(BaseRawFileChecker):
             "wrong-language-in-comment",
             "Used if a comment is suspected to be written in German.",
         ),
+        "C3331": (
+            "Missing or malformed AI usage information (comment or __credits__)",
+            "missing-or-malformed-ai-usage",
+            "Used if AI usage information could not be detected.",
+        ),
     }
     options = ()
 
@@ -144,10 +153,19 @@ class EprRawFileChecker(BaseRawFileChecker):
                 args=(confidence,), confidence=INFERENCE)
 
     def process_module(self, node: nodes.Module) -> None:
+        # TODO: Untangle AI usage detection and comment parsing
+        ai_info_found = False
         curr_str_delim: bytes|None = None
 
         with node.stream() as strm:
             for line_idx, line in enumerate(strm):
+                # AI usage detection
+                if not ai_info_found:
+                    line_text = line.decode("utf-8", errors="ignore")
+                    if RE_AI_USAGE_COMMENT.match(line_text) or RE_AI_USAGE_CREDITS.match(line_text):
+                        ai_info_found = True
+
+                # Comment parsing
                 if not (b'"' in line or b"'" in line or b"#" in line):
                     continue
                 line = line.rstrip(b"\r\n")
@@ -180,6 +198,9 @@ class EprRawFileChecker(BaseRawFileChecker):
                         i += len(str_delim)
                     else:
                         i += 1
+
+        if not ai_info_found:
+            self.add_message("missing-or-malformed-ai-usage", line=1)
 
 def register(linter: PyLinter) -> None:
     linter.register_checker(EprChecker(linter))
