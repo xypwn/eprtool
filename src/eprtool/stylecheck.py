@@ -73,7 +73,7 @@ class Message:
     msg: str # readable description
 
     @classmethod
-    def from_pylint(cls, msg: pylint.message.Message) -> Message:
+    def from_pylint(cls, msg: pylint.message.Message) -> "Message":
         return Message(
             msg.path,
             msg.line,
@@ -88,7 +88,7 @@ class Message:
     def __str__(self) -> str:
         return f"{self.source}: {self.filename}:{self.line}:{self.column}: {self.msg_id} {self.msg}"
 
-    def __lt__(self, other: Message) -> bool:
+    def __lt__(self, other: "Message") -> bool:
         # Compare field-by-field, respecing None
         for k in Message.__dataclass_fields__:
             a = self.__dict__[k]

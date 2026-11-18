@@ -1,7 +1,6 @@
 import mimetypes
 import ctypes
-import multiprocessing as mp
-import multiprocessing.queues as mpq
+import multiprocessing
 import os
 import pickle
 import queue
@@ -9,7 +8,6 @@ import re
 import sys
 import time
 import tomllib
-import traceback
 import typing
 import unicodedata
 import zipfile
@@ -26,6 +24,7 @@ from imgui_bundle import imgui_color_text_edit as imgui_cte
 from showinfm import show_in_file_manager
 
 from eprtool import stylecheck
+import eprtool.multiproc as mp
 
 TYPST_PRELUDE = """
 #import "@preview/codly:2.0.0" as codly
@@ -364,87 +363,10 @@ class MainState:
     """
     codeviewer: imgui_cte.TextEditor
 
-@dataclass
-class Status:
-    SpecialProgress = typing.Literal["infinite", "textonly"]
-
-    msg: str
-    progress: float|SpecialProgress = "textonly"
-
-@dataclass
-class Task:
-    fn: typing.Callable
-    args: typing.Iterable
-
-# For use as sentinel value
-class Stop:
-    def __eq__(self, other):
-        return isinstance(other, Stop)
-
-# Context passed to any task function
-@dataclass
-class Context:
-    msgq: mp.Queue[Status]
-
-class TaskException(BaseException):
-    def __init__(self, parent: BaseException):
-        super().__init__(parent)
-        self.formatted_tb: list[str] = traceback.format_tb(parent.__traceback__)
-
-def _task_worker(ctx: Context, taskq: mp.Queue[Task|Stop], resq: mp.Queue[State|None|TaskException]):
-    for task in iter(taskq.get, Stop()):
-        assert isinstance(task, Task)
-        ok = False
-        try:
-            res = task.fn(*([ctx]+list(task.args)))
-            ok = True
-        except BaseException as e:  # noqa: BLE001
-            resq.put(TaskException(e))
-        if ok:
-            assert isinstance(res, State|None)
-            resq.put(res)
-
-# Main process data of task worker state
-class TaskManager:
-    def __init__(self):
-        # Queue for sending tasks to worker
-        self.taskq: mpq.Queue[Task|Stop] = mp.Queue()
-        # Result from worker
-        self.resq: mpq.Queue[State|None|TaskException] = mp.Queue()
-        # Queue for sending status messages from worker
-        self.msgq: mpq.Queue[Status] = mp.Queue()
-        # Worker process
-        self.proc = mp.Process(target=_task_worker, args=(
-            Context(self.msgq),
-            self.taskq,
-            self.resq,
-        ))
-        # Whether worker is currently executing a task
-        self.working = False
-        # Current display status
-        self.status = Status("")
-        # Last error message
-        self.error: TaskException|None = None
-
-        self.proc.start()
-
-    def enqueue(self, task: Task):
-        self.taskq.put(task)
-        self.status = Status("working")
-        self.working = True
-
-    def shutdown(self):
-        self.taskq.put(Stop())
-        self.proc.join()
-        self.taskq.close()
-        self.resq.close()
-        self.msgq.close()
-        self.proc.close()
-
 RE_GUESS_EXCERCISE_GROUP = re.compile(r"^[\w ]+?\d+[\w -]+?(?P<ex>\d+)[\w -]+?(?P<gr>\d+)", re.UNICODE)
 
-def _task_open_submission_or_submissions(ctx: Context, state: State, stud_name_if_single_subm_file: str|None = "") -> State:
-    ctx.msgq.put(Status("choosing file"))
+def _task_open_submission_or_submissions(ctx: mp.Context, state: State, stud_name_if_single_subm_file: str|None = "") -> State:
+    ctx.msgq.put(mp.Status("choosing file"))
 
     single_subm_file = stud_name_if_single_subm_file is not None
 
@@ -517,11 +439,11 @@ def _task_open_submission_or_submissions(ctx: Context, state: State, stud_name_i
 
 RE_VALID_EXCERCISE_TITLE = re.compile(r"^[\w\-. ]+$")
 
-def _task_export_to_feedback_folder(ctx: Context, state: State) -> State:
+def _task_export_to_feedback_folder(ctx: mp.Context, state: State) -> State:
     if RE_VALID_EXCERCISE_TITLE.match(state.excercise) is None:
         raise Exception("Invalid excercise title")
     assert state.subms is not None
-    ctx.msgq.put(Status("choosing destination"))
+    ctx.msgq.put(mp.Status("choosing destination"))
     folder_name = crossfiledialog.choose_folder("Choose output folder",
         os.path.dirname(state.last_exported_folder) if state.last_exported_folder != "" else None)  # ty: ignore[invalid-argument-type]
     if folder_name == "" or folder_name is None:
@@ -540,7 +462,7 @@ def _task_export_to_feedback_folder(ctx: Context, state: State) -> State:
             "stud-id": subm.stud_id,
             "files": [],
         }
-        ctx.msgq.put(Status(f"Unpacking files and compiling PDFs ({i}/{len(state.subms)})", i/len(state.subms)))
+        ctx.msgq.put(mp.Status(f"Unpacking files and compiling PDFs ({i}/{len(state.subms)})", i/len(state.subms)))
         typst_code: list[str] = []
         for finfo in state.subm_file_cinfos[subm.stud_id]:
             tomldata["submissions"][subm.stud_id]["files"].append({
@@ -593,8 +515,8 @@ def _task_export_to_feedback_folder(ctx: Context, state: State) -> State:
     state.info_popup_show_folder = out_dir
     return state
 
-def _task_pack_feedback_zip(ctx: Context, state: State) -> State:
-    ctx.msgq.put(Status("choosing feedback folder"))
+def _task_pack_feedback_zip(ctx: mp.Context, state: State) -> State:
+    ctx.msgq.put(mp.Status("choosing feedback folder"))
     folder_name = crossfiledialog.choose_folder("Choose feedback folder",
         state.last_exported_folder if state.last_exported_folder != "" else None)  # ty: ignore[invalid-argument-type]
     if folder_name == "" or folder_name is None:
@@ -712,23 +634,23 @@ def set_preview_code(codeviewer: imgui_cte.TextEditor, filename: str, code: str,
             "warning", tooltip)
     return msgs
 
-def draw_gui(state: State, main_state: MainState, task_mgr: TaskManager) -> None:
+def draw_gui(state: State, main_state: MainState, task_mgr: mp.TaskManager[State]) -> None:
     imgui.begin_disabled(task_mgr.working)
     if imgui.button("Open submission ZIP"):
-        task_mgr.enqueue(Task(_task_open_submission_or_submissions, (state, None)))
+        task_mgr.enqueue(mp.Task(_task_open_submission_or_submissions, (state, None)))
         # TODO: This is a very hacky way of doing the popup
         imgui.open_popup("Status")
     imgui.same_line()
     imgui.begin_disabled(state.subms is None)
     if imgui.button("Export to feedback folder"):
-        task_mgr.enqueue(Task(_task_export_to_feedback_folder, (state,)))
+        task_mgr.enqueue(mp.Task(_task_export_to_feedback_folder, (state,)))
         imgui.open_popup("Status")
     if state.subms is None:
         imgui.set_item_tooltip("You must open a submission ZIP first")
     imgui.end_disabled()
     imgui.same_line()
     if imgui.button("Pack feedback ZIP"):
-        task_mgr.enqueue(Task(_task_pack_feedback_zip, (state,)))
+        task_mgr.enqueue(mp.Task(_task_pack_feedback_zip, (state,)))
         imgui.open_popup("Status")
     imgui.end_disabled()
     imgui.same_line()
@@ -804,7 +726,7 @@ def draw_gui(state: State, main_state: MainState, task_mgr: TaskManager) -> None
         imgui_object_field_input_text("Submitter name", state, "manual_subm_name")
         imgui.begin_disabled(state.manual_subm_name == "")
         if imgui.button("Select submission file"):
-            task_mgr.enqueue(Task(_task_open_submission_or_submissions, (state, state.manual_subm_name)))
+            task_mgr.enqueue(mp.Task(_task_open_submission_or_submissions, (state, state.manual_subm_name)))
         imgui.end_disabled()
     else:
         rich_md.push_selectable_text(False)
@@ -988,7 +910,7 @@ def draw_gui(state: State, main_state: MainState, task_mgr: TaskManager) -> None
         except queue.Empty:
             pass
         try:
-            v = task_mgr.resq.get_nowait()
+            v = task_mgr.dequeue()
             if isinstance(v, State):
                 # Copy all fields to state (deepcopy not necessary since data was pickled)
                 for k, f in v.__dict__.items():
@@ -998,12 +920,11 @@ def draw_gui(state: State, main_state: MainState, task_mgr: TaskManager) -> None
                     imgui.open_popup("Info")
             elif v is None:
                 pass
-            elif isinstance(v, TaskException):
+            elif isinstance(v, mp.TaskException):
                 task_mgr.error = v
                 imgui.open_popup("Error")
             else:
                 raise Exception(f"unknown task result type {type(v)}")
-            task_mgr.working = False
         except queue.Empty:
             pass
 
@@ -1031,7 +952,7 @@ def main():
     except FileNotFoundError:
         pass
 
-    task_mgr = TaskManager()
+    task_mgr = mp.TaskManager[State]()
 
     DEBUG_FPS = False
     if DEBUG_FPS:
@@ -1103,5 +1024,5 @@ def main():
             pickle.dump(state, f)
 
 if __name__ == "__main__":
-    mp.freeze_support()
+    multiprocessing.freeze_support()
     main()
