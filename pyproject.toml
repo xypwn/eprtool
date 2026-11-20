@@ -16,7 +16,11 @@ dependencies = [
     "simplemma>=2.0.0",
     "tomli-w>=1.2.0",
     "typst>=0.15.0",
+    "watchdog>=7.1.0",
 ]
+
+[tool.ruff]
+target-version = "py314"
 
 [dependency-groups]
 test = ["pytest"]
@@ -28,7 +32,9 @@ build-backend = "uv_build"
 
 [project.gui-scripts]
 eprtool = "eprtool:main"
+eprcheck = "eprcheck:main"
 
-# eprtool-dev is inside "scripts" to not suppress CLI output on Windows.
+# *-dev is inside "scripts" to not suppress CLI output on Windows.
 [project.scripts]
 eprtool-dev = "eprtool:main"
+eprcheck-dev = "eprcheck:main"

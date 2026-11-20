@@ -134,30 +134,35 @@ class Config:
 _DEFAULT_CONFIG = Config()
 
 @contextlib.contextmanager
-def context_stdin(data: bytes):
+def _checker_context(data: bytes):
     prev_stdin = sys.stdin
     sys.stdin = io.TextIOWrapper(io.BytesIO(data))
     yield
     sys.stdin = prev_stdin
 
-def check(filename: str, file_data: bytes | None = None, cfg: Config = _DEFAULT_CONFIG) -> list[Message]:
+def check(filename: str, file_data: bytes | None = None, cfg: Config = _DEFAULT_CONFIG, project_root: str | None = None) -> list[Message]:
     if file_data is None:
         with open(filename, "rb") as f:
             file_data = f.read()
 
     msgs: list[Message] = []
-    with context_stdin(file_data):
+    with _checker_context(file_data):
         reporter = pylint.reporters.CollectingReporter()
-        pylint.lint.Run(("--load-plugins=eprtool.pylint_epr,pylint.extensions.docstyle,pylint.extensions.dunder,pylint.extensions.private_import",
+        args = [
+            "--load-plugins=eprtool.pylint_epr,pylint.extensions.docstyle,pylint.extensions.dunder,pylint.extensions.private_import",
             "--disable=all",
             f"--enable={",".join(_PYLINT_MESSAGE_IDS)}",
-            "--from-stdin", # TODO: Support stdin and file paths
-            filename),
+            "--from-stdin",
+            filename
+        ]
+        if project_root is not None:
+            args.append("--source-roots="+project_root)
+        pylint.lint.Run(args,
             reporter=reporter,
             exit=False)
         msgs += [Message.from_pylint(msg) for msg in reporter.messages]
 
-    with context_stdin(file_data):
+    with _checker_context(file_data):
         ignore = pycodestyle.DEFAULT_IGNORE.split(",")
         if cfg.max_line_length == 0:
             ignore.append("E501")
