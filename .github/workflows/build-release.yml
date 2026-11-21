@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   release-windows:
-    name: Release Windows Binary
+    name: Release Windows Binaries
     runs-on: windows-latest
     steps:
     - name: Checkout
@@ -33,7 +33,7 @@ jobs:
           eprcheck.exe
 
   release-linux:
-    name: Release Linux Binary
+    name: Release Linux Binaries
     runs-on: ubuntu-latest
     steps:
     - name: Checkout
@@ -49,11 +49,14 @@ jobs:
         uv run pyinstaller eprcheck.spec -- --guionly
     - name: Rename executable
       run: mv dist/* .
-    - name: Create archive
+    - name: Create archives
       run: |
-        tar cJf eprtool-linux.tar.xz eprtool eprcheck
+        tar cJf eprtool-linux.tar.xz eprtool
+        tar cJf eprcheck-linux.tar.xz eprcheck
     - name: Upload archive
       uses: softprops/action-gh-release@v3
       if: startsWith(github.ref, 'refs/tags/')
       with:
-        files: eprtool-linux.tar.xz
+        files: |
+          eprtool-linux.tar.xz
+          eprcheck-linux.tar.xz
