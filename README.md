@@ -72,13 +72,6 @@ Once every PDF has been annotated, click "Pack feedback ZIP". Select the feedbac
 - [eprgrader](https://github.com/Lukas-Horst/epr_grader) by Lukas Horst
     - List of used pylint rules
 
-## Status
-This software is _currently_ unstable af. Setting and submission file/folder cross-version compatibility is NOT guaranteed.
-
-To reset the settings, delete:
-- Windows: `%localappdata%/eprtool/eprtool/settings.toml`
-- Linux: `~/.config/eprtool/settings.toml`
-
 ## Hacking
 - Clone the repo (`git clone https://github.com/xypwn/eprtool; cd eprtool`)
 - Python source code is in `src`
