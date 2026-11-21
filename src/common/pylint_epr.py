@@ -9,7 +9,7 @@ from simplemma import LanguageDetector
 if TYPE_CHECKING:
     from pylint.lint import PyLinter
 
-RE_AUTHOR_VARIABLE = re.compile(r"^\d+, [\w-]+(, \d+, [\w-]+)*$", re.UNICODE)
+RE_AUTHOR_VARIABLE = re.compile(r"^\d+, [\w'-]+(, \d+, [\w'-]+)*$", re.UNICODE)
 RE_AI_USAGE_COMMENT = re.compile(r"^# ?(generated|made|done|written) (with|without) (support of )?AI.*$", re.UNICODE|re.IGNORECASE)
 # FIXME: Doesn't detect if string delims match.
 # TODO: Decide if accepting any credits is good enough or if the string must contain specific elements.
