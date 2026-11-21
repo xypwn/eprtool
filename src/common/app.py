@@ -16,8 +16,8 @@ import platformdirs
 import tomli_w
 from imgui_bundle import hello_imgui, imgui, immapp, rich_md
 
-from eprtool import ui
-from eprtool.ui import ensure_popup_open
+from common import ui
+from common.ui import ensure_popup_open
 
 
 @dataclass
@@ -82,7 +82,9 @@ class MainContext[State, PersistentState]:
         values = self.persistent_state.__dict__
         for k in fields:
             metadata = fields[k].metadata
-            label = metadata.get("label", k)
+            label = metadata.get("label", None)
+            if label is None:
+                continue
             hint = metadata.get("hint", "")
             tooltip = metadata.get("tooltip", "")
             validate = metadata.get("validate", lambda x: True)
@@ -118,8 +120,8 @@ def get_root_dir() -> Path:
         return Path(__file__).parent.parent
 
 def get_res_dir() -> Path:
-    """Returns the eprtool/res directory"""
-    return get_root_dir()/"eprtool"/"res"
+    """Returns the common/res directory"""
+    return get_root_dir()/"common"/"res"
 
 def write_file(path: str|Path, data: bytes|str) -> None:
     path = Path(path)
@@ -139,7 +141,14 @@ def read_file_str(path: str|Path) -> str:
     with open(path, "r") as f:
         return f.read()
 
-def run(setup: typing.Callable[[MainContext], None], draw_gui: typing.Callable[[MainContext], None], apptitle: str, appdirname: str) -> None:
+def run(
+    setup: typing.Callable[[MainContext], None],
+    draw_gui: typing.Callable[[MainContext], None],
+    apptitle: str,
+    appdirname: str,
+    *,
+    persistent_state_loaded: typing.Callable[[MainContext], None] | None = None,
+) -> None:
     with futures.ThreadPoolExecutor() as tpe:
         ctx = MainContext(
             platformdirs.PlatformDirs(appdirname),
@@ -193,6 +202,10 @@ def run(setup: typing.Callable[[MainContext], None], draw_gui: typing.Callable[[
                     ctx.persistent_state.__dict__[k] = pstate[k]
             except FileNotFoundError:
                 pass
+            
+            if persistent_state_loaded is not None:
+                with ctx.lock:
+                    persistent_state_loaded(ctx)
 
         def _draw():
             try:
@@ -222,7 +235,7 @@ def run(setup: typing.Callable[[MainContext], None], draw_gui: typing.Callable[[
 
             if len(ctx.errors):
                 ui.ensure_popup_open("Error")
-            if ui.begin_modal_box("Error", (300, 400)):
+            if ui.begin_modal_box("Error", (400, 400)):
                 err = ctx.errors[0]
                 if err is not None:
                     tb =  "\n".join(err.formatted_tb)

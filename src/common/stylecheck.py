@@ -12,7 +12,7 @@ import pylint.lint
 import pylint.message
 import pylint.reporters
 
-from eprtool import pylint_epr
+from common import pylint_epr
 
 _PYLINT_EPR_MESSAGE_IDS = list((pylint_epr.EprChecker.msgs | pylint_epr.EprRawFileChecker.msgs).keys())
 

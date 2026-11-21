@@ -1,26 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_data_files, collect_all
+from PyInstaller.utils.hooks import collect_all, collect_data_files
 
-import os
-import glob
-import re
-import argparse
+from installer_utils import *
 
-argp = argparse.ArgumentParser()
-argp.add_argument("--guionly", action="store_true")
-args = argp.parse_args()
+args = parse_args()
 
-def path_re_norm(s: str) -> str:
-    return s.replace("/", "\\\\") if os.name == "nt" else s
-
-exclude_datas = [re.compile(path_re_norm(p)) for p in [
-    # Filter out all simplemma language files that aren't German or English (saves ~20MiB)
-    r".*/simplemma/strategies/dictionaries/data/(?!(en|de)\.)\w+\.plzma$",
-    # We don't use the default imgui_bundle resources
-    r".*/imgui_bundle/(assets|demos_assets|demos_cpp|demos_python)/.*$",
-]]
-
-datas = [('src/eprtool/res', 'eprtool/res')]
+datas = [('src/common/res', 'common/res')]
 binaries = []
 hiddenimports = ["eprtool"]
 
@@ -31,14 +16,6 @@ datas += isort_datas
 binaries += isort_binaries
 hiddenimports += isort_hiddenimports
 
-def collect_isort_mypyc_bins() -> list[tuple[str, str]]:
-    res = []
-    import isort
-    pkg_dir = os.path.dirname(os.path.dirname(isort.__file__))
-    for b in glob.glob(os.path.join(pkg_dir, "*__mypyc*")):
-        if b.endswith((".pyd", ".so")):
-            res.append((b, "."))
-    return res
 binaries += collect_isort_mypyc_bins()
 
 a = Analysis(
@@ -55,8 +32,7 @@ a = Analysis(
     optimize=0,
 )
 
-a.datas = [(dst, src, typ) for dst, src, typ in a.datas
-    if not any(p.match(src) is not None for p in exclude_datas)]
+a.datas = exclude_datas(a.datas, DATAS_SIMPLEMMA_NON_EN_DE)
 
 pyz = PYZ(a.pure)
 
@@ -79,5 +55,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=["src/eprtool/res/app_settings/icon.ico"],
+    icon=["src/common/res/app_settings/icon.ico"],
 )

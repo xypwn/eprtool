@@ -1,4 +1,4 @@
-from eprtool.stylecheck import *
+from common.stylecheck import *
 
 
 def test_stylecheck():

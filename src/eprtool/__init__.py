@@ -17,7 +17,15 @@ import typst
 from imgui_bundle import imgui, rich_md
 from showinfm import show_in_file_manager
 
-from eprtool import app, stylecheck, stylecheck_ui, ui
+from common import (
+    IGNORED_DIRS,
+    IGNORED_FILES,
+    StyleSettings,
+    app,
+    stylecheck,
+    stylecheck_ui,
+    ui,
+)
 
 TYPST_PRELUDE = """
 #import "@preview/codly:2.0.0" as codly
@@ -61,15 +69,6 @@ TYPST_PRELUDE = """
 })
 #v(1em)
 """
-
-IGNORED_DIRS = (
-    "__MACOSX",
-    ".venv", "__pycache__", ".idea",
-)
-
-IGNORED_FILES = (
-    ".DS_Store",
-)
 
 TYPST_IMAGE_FORMATS = {
     ".png": "png",
@@ -211,14 +210,15 @@ class SubmissionFileInfo:
     kind: SubmissionFileKindTag
 
 @dataclass
-class PersistentState:
+class Settings:
     group_tutor: str = field(default="",
         metadata={"label": "Group and tutor", "hint": "e.g. EPR01 - Firstname"})
     pdf_suffix: str = field(default="_kommentiert",
         metadata={"label": "PDF suffix", "tooltip": "E.g. for xournalpp: German -> _kommentiert, English -> _annotated"})
-    style_max_line_length: int = field(default=79,
-        metadata={"label": "Style: Max line length", "tooltip": "Maximum line length (pycodestyle E501)\n0 to disable",
-        "validate": lambda v: v >= 0})
+
+@dataclass
+class PersistentState(StyleSettings, Settings):
+    pass
 
 @dataclass
 class State:
@@ -432,9 +432,9 @@ def _task_export_to_feedback_folder(ctx: AppContext) -> None:
         ctx.status = None
 
 def _task_pack_feedback_zip(ctx: AppContext) -> None:
-    state, pstate = ctx.state, ctx.persistent_state
-
     with ctx.lock:
+        state, pstate = ctx.state, ctx.persistent_state
+
         ctx.status = app.Status("Choosing feedback folder")
         start_dir = state.last_exported_folder if state.last_exported_folder != "" else None
 
@@ -492,7 +492,8 @@ def _task_pack_feedback_zip(ctx: AppContext) -> None:
         ctx.status = None
 
 def _task_lint_files(ctx: AppContext):
-    state, pstate = ctx.state, ctx.persistent_state
+    with ctx.lock:
+        state, pstate = ctx.state, ctx.persistent_state
 
     # FIXME: Handle case where new lint task is launched before results completely came in
 

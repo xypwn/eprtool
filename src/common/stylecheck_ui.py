@@ -1,12 +1,10 @@
 import posixpath
 import typing
-from dataclasses import dataclass, field
-from pathlib import Path
 
 from imgui_bundle import imgui
 from imgui_bundle import imgui_color_text_edit as imgui_cte
 
-from eprtool import stylecheck, ui
+from common import stylecheck, ui
 
 
 def message_to_cte_doc_pos(msg: stylecheck.Message) -> tuple[imgui_cte.TextEditor.DocPos, imgui_cte.TextEditor.DocPos]:
@@ -77,7 +75,12 @@ class CodeViewer:
         self._files = {}
         self._messages = {}
 
-    def set_file(self, fname: str, code: str) -> None:
+    def set_file(self, fname: str, code: str | None) -> None:
+        if fname in self._messages:
+            self._messages.pop(fname, None)
+        if code is None:
+            self._files.pop(fname, None)
+            return
         self._files[fname] = code
         if fname == self._sel_file:
             self._load_file(fname)
@@ -88,7 +91,9 @@ class CodeViewer:
     def set_file_messages(self, fname: str, messages: list[stylecheck.Message]) -> None:
         self._messages[fname] = messages
         if fname == self._sel_file:
-            self._load_file(fname)
+            self.te.clear_markers()
+            self.te.clear_squiggles()
+            load_msg_annots(self.te, self._messages[fname])
 
     def _load_file(self, fname: str | None) -> None:
         if fname in self._files:
@@ -99,6 +104,8 @@ class CodeViewer:
             load_msg_annots(self.te, self._messages[fname])
 
     def select_file(self, fname: str | None) -> None:
+        if self._sel_file == fname:
+            return
         self._load_file(fname)
         self._sel_file = fname
 
