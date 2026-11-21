@@ -215,13 +215,11 @@ def draw_gui(ctx: AppContext) -> None:
                         # Find last modification in diff; go there.
                         ops = difflib.SequenceMatcher(None, old_data, data).get_opcodes()
                         ops = [op for op in ops if op[0] != "equal"]
-                        print(ops)
                         if len(ops):
                             op = ops[0]
                             pos = op[4] # first change end offset
                             pos = min(pos, len(data))
                             line_idx = data[:pos].count("\n")
-                            print(pos, line_idx)
                             state.codeviewer.te.set_cursor(imgui_cte.TextEditor.DocPos(line_idx+1, 0))
             if len(to_reload):
                 ctx.tpe.submit(_task_lint_files, ctx, to_reload)

@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all, collect_data_files
 
-from installer_utils import *
+from misc.installer_utils import *
 
 args = parse_args()
 

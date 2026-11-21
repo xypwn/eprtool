@@ -1,19 +1,40 @@
-# eprtool
+# eprtool and eprcheck
 
+## eprcheck (for students)
+![eprtool](screenshots/eprcheck.png)
 
-## Running
-### Via direct download (standalone executable)
+### Running
+- [Windows EXE (64-bit)](https://github.com/xypwn/eprtool/releases/latest/download/eprcheck.exe)
+- [Linux executable (64-bit, archived)](https://github.com/xypwn/eprtool/releases/latest/download/eprcheck-linux.tar.xz)
+- Any OS (via uvx):
+    - Make sure [uv](https://docs.astral.sh/uv/getting-started/installation/) is installed
+    - `uvx --from git+https://github.com/xypwn/eprtool eprcheck`
+
+### Features
+- A single simple graphical program
+- Check EPR-specific PEP-8 and custom rules using pylint and pycodestyle
+    - `__author__` variable correctness
+    - Presence of AI usage information
+    - Warn if inferred comment or docstring language is German
+    - Many pylint and pycodestyle rules
+        - See [here](https://github.com/xypwn/eprtool/blob/main/src/common/stylecheck.py#L19) for exact pylint rules applied
+- File watching: Once a folder is opened, it is automatically watched for updates
+    - Changed files are re-loaded and re-linted automatically
+    - The code view automatically scrolls to the new change
+
+## eprtool (for tutors)
+![eprtool](screenshots/eprtool.png)
+
+### Running
 - [Windows EXE (64-bit)](https://github.com/xypwn/eprtool/releases/latest/download/eprtool.exe)
 - [Linux executable (64-bit, archived)](https://github.com/xypwn/eprtool/releases/latest/download/eprtool-linux.tar.xz)
+- Any OS (via uvx):
+    - Make sure [uv](https://docs.astral.sh/uv/getting-started/installation/) is installed
+    - `uvx --from git+https://github.com/xypwn/eprtool eprtool`
+Note that the eprtool executables quite big, since they include [typst](https://github.com/typst/typst) for PDF generation, as well as dearimgui_bundle, Python other large libraries.
 
-Note that the executables quite big, since they include [typst](https://github.com/typst/typst) for PDF generation, as well as other large libraries.
-
-### Via uvx (requires uv)
-```sh
-uvx --from git+https://github.com/xypwn/eprtool eprtool
-```
-
-## Usage
+### Usage
+<!--generate: export src/common/res/EPRTOOL_HELP.md-->
 #### 0. Configure settings
 In "Settings":
 - Set "Tutor" to the title of your tutoring group(s) (e.g. "EPR 01/02 - Firstname")
@@ -45,6 +66,11 @@ Make sure your settings are set correctly for your chosen PDF annotator and lang
 
 #### 6. Repack ZIP
 Once every PDF has been annotated, click "Pack feedback ZIP". Select the feedback folder. A .zip file will appear inside, which can be uploaded to Moodle via "Upload feedback files as ZIP".
+<!--generate: end-->
+
+## Credits
+- [eprgrader](https://github.com/Lukas-Horst/epr_grader) by Lukas Horst
+    - List of used pylint rules
 
 ## Status
 This software is _currently_ unstable af. Setting and submission file/folder cross-version compatibility is NOT guaranteed.
@@ -55,6 +81,7 @@ To reset the settings, delete:
 
 ## Hacking
 - Clone the repo (`git clone https://github.com/xypwn/eprtool; cd eprtool`)
-- Python source code is in `src/eprtool`
+- Python source code is in `src`
 - Fetch dependencies: `uv sync`
-- Run: `uv run eprtool-dev`
+    - Fetch optional dependencies: `uv pip install --group test --group package`
+- Run: `uv run eprtool-dev` or `uv run eprcheck-dev`

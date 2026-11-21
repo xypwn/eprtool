@@ -149,7 +149,7 @@ def check(filename: str, file_data: bytes | None = None, cfg: Config = _DEFAULT_
     with _checker_context(file_data):
         reporter = pylint.reporters.CollectingReporter()
         args = [
-            "--load-plugins=eprtool.pylint_epr,pylint.extensions.docstyle,pylint.extensions.dunder,pylint.extensions.private_import",
+            "--load-plugins=common.pylint_epr,pylint.extensions.docstyle,pylint.extensions.dunder,pylint.extensions.private_import",
             "--disable=all",
             f"--enable={",".join(_PYLINT_MESSAGE_IDS)}",
             "--from-stdin",

@@ -715,7 +715,7 @@ def main() -> None:
     def setup(ctx: app.MainContext) -> None:
         ctx.persistent_state = PersistentState()
         ctx.state = State(
-            help_markdown=app.read_file_str(str(app.get_res_dir()/"HELP.md")),
+            help_markdown=app.read_file_str(str(app.get_res_dir()/"EPRTOOL_HELP.md")),
             codeviewer=stylecheck_ui.CodeViewer()
         )
         if DEBUG_SAVE_STATE:

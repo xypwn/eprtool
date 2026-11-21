@@ -38,3 +38,4 @@ eprcheck = "eprcheck:main"
 [project.scripts]
 eprtool-dev = "eprtool:main"
 eprcheck-dev = "eprcheck:main"
+readme-gen = "misc.readme_gen:main"

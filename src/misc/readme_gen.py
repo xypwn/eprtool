@@ -1,0 +1,72 @@
+import re
+import typing
+
+RE_GEN_CMD = re.compile(r"<!--generate:\s+(?P<cmd>\w+)\s*(?P<params>[^-]*)-->")
+
+type Cmd = typing.Callable[[str, list[str]], list[str] | None]
+
+commands: dict[str, Cmd] = {}
+
+def register_command(name: str) -> typing.Callable[[Cmd], Cmd]:
+    def _do(func: Cmd) -> Cmd:
+        commands[name] = func
+        return func
+    return _do
+
+@register_command("insert")
+def cmd_insert(param: str, lines: list[str]) -> list[str]:
+    with open(param, encoding="utf-8") as f:
+        ins_lines = f.readlines()
+        if len(ins_lines):
+            ins_lines[-1] = ins_lines[-1].rstrip("\r\n")+"\n"
+        return ins_lines
+
+@register_command("export")
+def cmd_export(param: str, lines: list[str]) -> None:
+    with open(param, "w", encoding="utf-8") as f:
+        f.writelines(lines)
+
+def main() -> None:
+    new_lines = []
+
+    with open("README.md", encoding="utf-8") as f:
+        lines = f.readlines()
+    
+    curr_cmd: tuple[str, str] | None = None
+    curr_cmd_lines: list[str] = []
+
+    for line in lines:
+        cmd = re.match(RE_GEN_CMD, line)
+        if cmd is not None:
+            cmd = (cmd["cmd"], cmd["params"])
+
+        if cmd is not None:
+            if cmd[0] == "end":
+                if not curr_cmd:
+                    raise Exception("unexpected end")
+                if curr_cmd[0] not in commands:
+                    raise Exception(f"unknown command {curr_cmd[0]}")
+                command_fn = commands[curr_cmd[0]]
+                res = command_fn(curr_cmd[1], curr_cmd_lines)
+                if res is None:
+                    new_lines += curr_cmd_lines
+                else:
+                    new_lines += res
+                curr_cmd = None
+                curr_cmd_lines = []
+            else:
+                curr_cmd = cmd
+
+            new_lines.append(line)
+        else:
+            if not curr_cmd:
+                new_lines.append(line)
+            else:
+                curr_cmd_lines.append(line)
+
+    with open("README.md", "w", encoding="utf-8") as f:
+        f.writelines(new_lines)
+
+
+if __name__ == "__main__":
+    main()
