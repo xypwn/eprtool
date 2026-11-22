@@ -213,7 +213,7 @@ class Settings:
         metadata={"label": "Incuded feedback files", "tooltip": "Comma-separated globs (e.g. *.pdf,*.xslx,*.ods)"})
 
 @dataclass
-class PersistentState(StyleSettings, Settings):
+class PersistentState(StyleSettings, Settings, app.AutoPersistentState):
     last_export_folder: str = ""
 
 @dataclass
@@ -415,7 +415,6 @@ def _task_export_to_feedback_folder(ctx: AppContext) -> None:
     
     with ctx.lock:
         pstate.last_export_folder = folder_name
-        ctx.persistent_state_signal_changed()
         state.info_popup = f"Exported {len(state.subms)} submissions (generated {num_pdfs} PDFs)"
         state.info_popup_show_folder = out_dir
         ctx.status = None

@@ -59,7 +59,7 @@ def norm_filename(path: str | Path, project_root: str | Path) -> str:
     return PurePath(Path(path).relative_to(project_root)).as_posix()
 
 @dataclass
-class PersistentState(StyleSettings):
+class PersistentState(StyleSettings, app.AutoPersistentState):
     last_opened_folders: list[str] = field(default_factory=list)
 
 type AppContext = app.MainContext[State, PersistentState]
@@ -87,7 +87,6 @@ def _task_open_folder(ctx: AppContext):
         except ValueError:
             pass
         pstate.last_opened_folders.append(folder_name)
-        ctx.persistent_state_signal_changed()
         state.curr_folder = Path(folder_name)
         state.folder_newly_selected = True
     ctx.status = None
@@ -259,7 +258,6 @@ def main() -> None:
                 state.folder_newly_selected = True
             else:
                 pstate.last_opened_folders.pop(-1)
-                ctx.persistent_state_signal_changed()
 
     app.run(setup, draw_gui, "EPR Checker", "eprchecker",
         persistent_state_loaded=pstate_loaded)

@@ -41,6 +41,15 @@ class _EmptyBaseState:
 class _EmptyPersistentState:
     pass
 
+@dataclass
+class AutoPersistentState:
+    __modified: bool = False
+
+    def __setattr__(self, name, value):
+        if name != f"_{AutoPersistentState.__name__}__modified":
+            self.__modified = True
+        super().__setattr__(name, value)
+
 State = typing.TypeVar("State", bound=_EmptyBaseState)
 PersistentState = typing.TypeVar("PersistentState", bound=_EmptyPersistentState)
 
@@ -90,6 +99,11 @@ class MainContext[State, PersistentState]:
         return os.path.join(self.dirs.user_config_dir, "persistent_state.toml")
 
     def persistent_state_signal_changed(self) -> None:
+        """Notify the app that a persistent_state field has changed.
+        
+        This is not required if you are using regular assignments and your PersistentState
+        class inherits from :class:`AutoPersistentState` (note that accessing ``__dict__`` bypasses
+        :class:`AutoPersistentState`'s mechanism)."""
         self._persistent_state_changed_time = imgui.get_time()
         self._persistent_state_saved = False
 
@@ -102,7 +116,9 @@ class MainContext[State, PersistentState]:
                 return field.default
             elif field.default_factory != dataclasses.MISSING:
                 return field.default_factory()
-        for k, field in fields.items():
+        for k, field in fields.items():  # noqa: F402
+            if k.startswith("_"):
+                continue
             metadata = field.metadata
             label = metadata.get("label", None)
             if label is None:
@@ -137,7 +153,10 @@ class MainContext[State, PersistentState]:
             "Reset all settings to their default value?",
         ):
             for k, field in fields.items():
-                values[k] = field_default_value(field)
+                if k.startswith("_"):
+                    continue
+                if "label" in field.metadata:
+                    values[k] = field_default_value(field)
             self.persistent_state_signal_changed()
         imgui.push_style_color(imgui.Col_.text, (1, 1, 1, 0.6))
         imgui.text("(Saved)" if self._persistent_state_saved else "(Waiting)")
@@ -240,7 +259,7 @@ def run(
             try:
                 pstate = tomllib.loads(read_file_str(ctx.persistent_state_path()))
                 for k in ctx.persistent_state.__dict__:
-                    if k not in pstate:
+                    if k.startswith("__") or k not in pstate:
                         continue
                     ctx.persistent_state.__dict__[k] = pstate[k]
             except FileNotFoundError:
@@ -256,9 +275,18 @@ def run(
             except Exception as e:  # noqa: BLE001
                 ctx.errors.append(TracedException(e))
 
+            if isinstance(ctx.persistent_state, AutoPersistentState):
+                mod_field = f"_{AutoPersistentState.__name__}__modified"
+                if ctx.persistent_state.__dict__[mod_field]:
+                    ctx._persistent_state_changed_time = imgui.get_time()
+                    ctx._persistent_state_saved = False
+                    ctx.persistent_state.__dict__[mod_field] = False
+
             ctx.persistent_state_just_changed = False
             if not ctx._persistent_state_saved and imgui.get_time() - ctx._persistent_state_changed_time > 0.5:
-                write_file(ctx.persistent_state_path(), tomli_w.dumps(ctx.persistent_state.__dict__))
+                write_file(ctx.persistent_state_path(), tomli_w.dumps({
+                    k: v for k, v in ctx.persistent_state.__dict__.items() if not k.startswith("_")
+                }))
                 ctx._persistent_state_saved = True
                 ctx.persistent_state_just_changed = True
 
@@ -305,6 +333,12 @@ def run(
                     _draw()
             except Exception as e:  # noqa: BLE001
                 ctx.errors.append(TracedException(e))
+            
+            with ctx.lock:
+                if len(ctx.errors) > 32:
+                    exc = Exception(ctx.errors[0].parent)
+                    exc.add_note(f"and {len(ctx.errors)-1} more exceptions")
+                    raise exc
 
         hello_imgui.set_assets_folder(str(get_res_dir()))
         rich_md.set_assets_folder(str(get_res_dir() / "richmd_assets"))
