@@ -45,6 +45,21 @@ State = typing.TypeVar("State", bound=_EmptyBaseState)
 PersistentState = typing.TypeVar("PersistentState", bound=_EmptyPersistentState)
 
 @dataclass
+class Executor(futures.ThreadPoolExecutor):
+    def __init__(self, on_error: typing.Callable[[TracedException], None]):
+        super().__init__()
+        self.on_error = on_error
+    
+    def submit(self, fn, /, *args, **kwargs):
+        def do_fn(*args, **kwargs):
+            try:
+                fn(*args, **kwargs)
+            except Exception as e:
+                self.on_error(TracedException(e))
+        super().submit(do_fn, *args, **kwargs)
+
+
+@dataclass
 class MainContext[State, PersistentState]:
     """Context for an app.
 
@@ -66,6 +81,8 @@ class MainContext[State, PersistentState]:
 
     status: Status | None = None
 
+    persistent_state_just_changed: bool = False
+
     _persistent_state_changed_time: float = 0
     _persistent_state_saved: bool = True
 
@@ -80,15 +97,20 @@ class MainContext[State, PersistentState]:
         assert dataclasses.is_dataclass(self.persistent_state)
         fields = self.persistent_state.__dataclass_fields__
         values = self.persistent_state.__dict__
-        for k in fields:
-            metadata = fields[k].metadata
+        def field_default_value(field: dataclasses.Field) -> typing.Any:
+            if field.default != dataclasses.MISSING:
+                return field.default
+            elif field.default_factory != dataclasses.MISSING:
+                return field.default_factory()
+        for k, field in fields.items():
+            metadata = field.metadata
             label = metadata.get("label", None)
             if label is None:
                 continue
             hint = metadata.get("hint", "")
-            tooltip = metadata.get("tooltip", "")
-            validate = metadata.get("validate", lambda x: True)
-            typ = fields[k].type
+            tooltip = str(metadata.get("tooltip", ""))
+            validate = metadata.get("validate", lambda _: True)
+            typ = field.type
             v = values[k]
             changed, v = imgui.input_text_with_hint(label, hint, str(v))
             if changed:
@@ -101,8 +123,22 @@ class MainContext[State, PersistentState]:
                 if ok and validate(v):
                     values[k] = v
                     self.persistent_state_signal_changed()
-            if tooltip:
-                imgui.set_item_tooltip(tooltip)
+            if imgui.begin_item_tooltip():
+                default = field_default_value(field)
+                if tooltip and not tooltip.endswith("\n"):
+                    tooltip += "\n"
+                tooltip += f"Default: {default if default else '""'}"
+                imgui.text(tooltip)
+                imgui.end_tooltip()
+        if imgui.button("Reset all"):
+            imgui.open_popup("Reset all##_AppSettingsReset")
+        if ui.modal_yesno_text(
+            "Reset all##_AppSettingsReset",
+            "Reset all settings to their default value?",
+        ):
+            for k, field in fields.items():
+                values[k] = field_default_value(field)
+            self.persistent_state_signal_changed()
         imgui.push_style_color(imgui.Col_.text, (1, 1, 1, 0.6))
         imgui.text("(Saved)" if self._persistent_state_saved else "(Waiting)")
         imgui.pop_style_color()
@@ -149,7 +185,14 @@ def run(
     *,
     persistent_state_loaded: typing.Callable[[MainContext], None] | None = None,
 ) -> None:
-    with futures.ThreadPoolExecutor() as tpe:
+    ctx = None
+    def tpe_on_error(err: TracedException) -> None:
+        assert ctx is not None
+        with ctx.lock:
+            ctx.status = None
+            ctx.errors.append(err)
+
+    with Executor(tpe_on_error) as tpe:
         ctx = MainContext(
             platformdirs.PlatformDirs(appdirname),
             tpe,
@@ -213,9 +256,11 @@ def run(
             except Exception as e:  # noqa: BLE001
                 ctx.errors.append(TracedException(e))
 
+            ctx.persistent_state_just_changed = False
             if not ctx._persistent_state_saved and imgui.get_time() - ctx._persistent_state_changed_time > 0.5:
                 write_file(ctx.persistent_state_path(), tomli_w.dumps(ctx.persistent_state.__dict__))
                 ctx._persistent_state_saved = True
+                ctx.persistent_state_just_changed = True
 
             if ctx.status is not None:
                 ensure_popup_open("Status")

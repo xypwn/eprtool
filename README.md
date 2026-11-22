@@ -38,10 +38,9 @@ Note that the eprtool executables quite big, since they include [typst](https://
 #### 0. Configure settings
 In "Settings":
 - Set "Tutor" to the title of your tutoring group(s) (e.g. "EPR 01/02 - Firstname")
-- Set "PDF suffix" to the suffix your PDF annotator adds to annotated filenames (e.g. for xournalpp, `_kommentiert` in German, `_annotated` in English etc.)
 
 #### 1. Open submission ZIP
-Use the "Open submission ZIP" button to select a ZIP file downloaded from moodle via "Download all submissions".
+Use the "Open submission ZIP" button to select a ZIP file downloaded from Moodle via "Download all submissions".
 
 #### 2. Ensure excercise and group are correct
 The tool should guess excercise and group correctly from the title, but if it didn't manage to guess or guessed incorrectly, you can adjust them in the respective text boxes.
@@ -59,10 +58,24 @@ Click on "Export to feedback folder" to export everything into a folder where yo
 
 The output will be a folder with your selected title as the name inside the selected folder.
 
+##### Folder structure
+```
++ Uebung 01_EPR01                     - excercise and group number
+|- Firstname Lastname_123456          - name and per-assignment Moodle ID
+|  |- files                           - all originally submitted files
+|  |- |- Documentation.pdf
+|  |- `- ex_01.py
+|  |- Documentation.pdf               - "separate" files (name is kept)
+|  `- Firstname Lastname_123456.pdf   - code and other "embed"ded files as one PDF; for annotation
+`- Max Mustermann_223456
+   |- files
+   `- ...
+```
+
 #### 5. Annotate files
 Recommended software: [xournalpp](https://xournalpp.github.io/).
 
-Make sure your settings are set correctly for your chosen PDF annotator and language (see 0.).
+For a PDF file `original_name.pdf`, the annotated version is is expected to be `original_name_annotated.pdf` or `original_name_kommentiert.pdf`.
 
 #### 6. Repack ZIP
 Once every PDF has been annotated, click "Pack feedback ZIP". Select the feedback folder. A .zip file will appear inside, which can be uploaded to Moodle via "Upload feedback files as ZIP".

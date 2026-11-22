@@ -1,9 +1,9 @@
 import copy
+import glob
 import mimetypes
 import os
 import pickle
 import re
-import tomllib
 import typing
 import unicodedata
 import zipfile
@@ -12,7 +12,6 @@ from pathlib import Path
 
 import chardet
 import crossfiledialog
-import tomli_w
 import typst
 from imgui_bundle import imgui, rich_md
 from showinfm import show_in_file_manager
@@ -75,8 +74,8 @@ TYPST_IMAGE_FORMATS = {
     ".jpg": "jpg",
     ".jpeg": "jpg",
     ".svg": "svg",
-    ".pdf": "pdf",
     ".webp": "webp",
+    #".pdf": "pdf", # won't consider PDF here, since that has a bunch of problems
 }
 
 @dataclass
@@ -90,13 +89,13 @@ class SingleSubmission:
     def folder_name(self) -> str:
         return f"{self.stud_name}_{self.stud_id}"
 
-RE_SUBMISSION_FILE = re.compile(r"^(?P<name>[^ ]+ [^_]+)_(?P<id>\d+)_assignsubmission_file/(?P<file>[^/]+)$")
+RE_EXPORTED_SUBM_FOLDER = re.compile(r"^(?P<name>.+)_(?P<id>\d+)$")
+RE_SUBM_FILE = re.compile(r"^(?P<name>.+)_(?P<id>\d+)_assignsubmission_file/(?P<file>[^/]+)$")
 
 @dataclass
 class SubmissionFilesResult:
     submissions: list[SingleSubmission] = field(default_factory=list)
     skipped_files: list[str] = field(default_factory=list)
-    unrecognized_files: list[str] = field(default_factory=list)
 
 @dataclass
 class FileKind:
@@ -104,21 +103,23 @@ class FileKind:
     """
     def __init__(self, filename: str):
         ext = os.path.splitext(filename)[1].lower()
-        base = os.path.basename(filename).lower()
-        self.mimetype = None
         self.is_text = False
-        if ext in mimetypes.types_map:
-            self.mimetype = mimetypes.types_map[ext]
-            self.is_text = self.mimetype.startswith("text/")
-        self.ext = ext
-        self.is_readme = base in ("readme", "readme.md", "readme.txt")
-        if self.is_readme:
+        if mimetypes.types_map.get(ext, "").startswith("text/"):
             self.is_text = True
+        self.ext = ext
+        self.is_documentation_text = ext in (".md", ".txt")
+        if self.is_documentation_text:
+            self.is_text = True
+        self.is_image = ext in TYPST_IMAGE_FORMATS
+        self.is_recognized = (self.is_documentation_text or
+                ext in (".py", ".pdf") or
+                self.is_image)
 
-    mimetype: str | None
     ext: str
     is_text: bool
-    is_readme: bool
+    is_documentation_text: bool
+    is_image: bool
+    is_recognized: bool
 
 # Submission may be ZIP or single file
 def submission_files_from_zip_or_file(filename: str, stud_name_if_single_subm_file: str|None = None) -> SubmissionFilesResult:
@@ -134,11 +135,6 @@ def submission_files_from_zip_or_file(filename: str, stud_name_if_single_subm_fi
     def submission_file_to_files(submission_filename: str, inp: typing.IO[bytes]) -> dict[str, str|bytes]:
         def file_to_str_or_bytes(filename: str, f: typing.IO[bytes]) -> str|bytes|None:
             kind = FileKind(filename)
-            if (not kind.is_readme and
-                kind.ext not in (".py", ".pdf") and
-                kind.ext not in TYPST_IMAGE_FORMATS):
-                result.unrecognized_files.append(submission_filename+"/"+filename)
-                return None
             if kind.is_text:
                 return auto_str(f.read()).replace("\r\n", "\n")
             else:
@@ -189,7 +185,7 @@ def submission_files_from_zip_or_file(filename: str, stud_name_if_single_subm_fi
                 fname = finfo.filename
                 if finfo.is_dir():
                     continue
-                m = RE_SUBMISSION_FILE.match(fname)
+                m = RE_SUBM_FILE.match(fname)
                 if m is None:
                     result.skipped_files.append(fname)
                     continue
@@ -213,12 +209,12 @@ class SubmissionFileInfo:
 class Settings:
     group_tutor: str = field(default="",
         metadata={"label": "Group and tutor", "hint": "e.g. EPR01 - Firstname"})
-    pdf_suffix: str = field(default="_kommentiert",
-        metadata={"label": "PDF suffix", "tooltip": "E.g. for xournalpp: German -> _kommentiert, English -> _annotated"})
+    include_feedback_files: str = field(default="*.pdf,*.xslx,*.ods",
+        metadata={"label": "Incuded feedback files", "tooltip": "Comma-separated globs (e.g. *.pdf,*.xslx,*.ods)"})
 
 @dataclass
 class PersistentState(StyleSettings, Settings):
-    pass
+    last_export_folder: str = ""
 
 @dataclass
 class State:
@@ -240,8 +236,6 @@ class State:
 
     editing_file_info_idx: int | None = None
     focus_editing_file_info: bool = False
-
-    last_exported_folder: str = ""
 
     info_popup: str = ""
     info_popup_show_file: str = ""
@@ -292,6 +286,7 @@ def _task_open_submission_or_submissions(ctx: AppContext, stud_name_if_single_su
             state.subms = []
         state.subms += submission_files.submissions
         state.subms.sort(key=lambda s: s.stud_name)
+        unrecognized_files = []
 
         if single_subm_file:
             state.subm_idx = state.subms.index(submission_files.submissions[0])
@@ -301,10 +296,18 @@ def _task_open_submission_or_submissions(ctx: AppContext, stud_name_if_single_su
         for subm in submission_files.submissions:
             state.subm_file_cinfos[subm.stud_id] = []
             for fname in sorted(subm.files.keys()):
+                kind = FileKind(fname)
+                if not kind.is_recognized:
+                    unrecognized_files.append(f"{subm.stud_name}/{fname}")
+                subm_kind = "ignore"
+                if kind.ext == ".py" or kind.is_documentation_text or kind.is_image:
+                    subm_kind = "embed"
+                elif kind.ext == ".pdf":
+                    subm_kind = "separate"
                 state.subm_file_cinfos[subm.stud_id].append(SubmissionFileInfo(
                     fname,
                     fname,
-                    "separate" if fname.lower().endswith(".pdf") else "embed",
+                    subm_kind,
                     ))
 
             # If all filenames in a submission share a common first path element,
@@ -329,9 +332,9 @@ def _task_open_submission_or_submissions(ctx: AppContext, stud_name_if_single_su
         if submission_files.skipped_files:
             state.info_popup += f"- Skipped {len(submission_files.skipped_files)} files in the submission archive that didn't look like submissions:\n"
             state.info_popup += filename_list_md(submission_files.skipped_files)
-        if submission_files.unrecognized_files:
-            state.info_popup += f"- Failed to recognize type of {len(submission_files.unrecognized_files)} submitted files:\n"
-            state.info_popup += filename_list_md(submission_files.unrecognized_files)
+        if unrecognized_files:
+            state.info_popup += f"- Failed to recognize type of {len(unrecognized_files)} submitted files:\n"
+            state.info_popup += filename_list_md(unrecognized_files)
 
         ctx.status = None
 
@@ -346,7 +349,7 @@ def _task_export_to_feedback_folder(ctx: AppContext) -> None:
         assert state.subms is not None
 
         ctx.status = app.Status("Choosing destination")
-        start_dir = os.path.dirname(state.last_exported_folder) if state.last_exported_folder != "" else None
+        start_dir = pstate.last_export_folder or None
 
     folder_name = crossfiledialog.choose_folder("Choose output folder", start_dir)  # ty: ignore[invalid-argument-type]
 
@@ -355,11 +358,6 @@ def _task_export_to_feedback_folder(ctx: AppContext) -> None:
             ctx.status = None
             return
 
-        tomldata = {
-            "excercise": state.excercise,
-            "group": state.group,
-            "submissions": {},
-        }
         num_pdfs = 0
         out_dir = os.path.join(folder_name, f"{state.excercise}_{state.group}")
         subms = copy.deepcopy(state.subms)
@@ -373,20 +371,10 @@ def _task_export_to_feedback_folder(ctx: AppContext) -> None:
                 "{tutor}", pstate.group_tutor)
 
         subm_dir = os.path.join(out_dir, subm.folder_name())
-        tomldata["submissions"][subm.stud_id] = {
-            "stud-name": subm.stud_name,
-            "stud-id": subm.stud_id,
-            "files": [],
-        }
         with ctx.lock:
             ctx.status = app.Status(t"Unpacking files and compiling PDFs ({i}/{len(subms)})", i/len(subms))
         typst_code: list[str] = []
         for finfo in subm_file_cinfos[subm.stud_id]:
-            tomldata["submissions"][subm.stud_id]["files"].append({
-                "name": finfo.filename,
-                "custom-name": finfo.custom_filename,
-                "kind": finfo.kind,
-            })
             fdata = subm.files[finfo.filename]
             if finfo.kind == "ignore":
                 continue
@@ -401,7 +389,7 @@ def _task_export_to_feedback_folder(ctx: AppContext) -> None:
                         lang = "py"
                     elif kind.ext == ".txt":
                         lang = "txt"
-                    elif kind.is_readme:
+                    elif kind.is_documentation_text:
                         lang = "md"
                     else:
                         raise Exception(f"cannot embed text file {finfo.custom_filename!r} with unknown type")
@@ -418,15 +406,16 @@ def _task_export_to_feedback_folder(ctx: AppContext) -> None:
         if len(typst_code):
             code = typst_prelude_code
             code += "#pagebreak()\n".join(typst_code)
+            code += '#v(4cm)\n#""\n' # ensure we have 4cm of space for final remarks
+
             app.write_file(
                 os.path.join(subm_dir, f"{subm.stud_name}_{subm.stud_id}.pdf"),
                 typst.compile(code.encode("utf-8")))
             num_pdfs += 1
     
     with ctx.lock:
-        state.last_exported_folder = out_dir
-        app.write_file(os.path.join(out_dir, "eprtool.toml"),
-            tomli_w.dumps(tomldata))
+        pstate.last_export_folder = folder_name
+        ctx.persistent_state_signal_changed()
         state.info_popup = f"Exported {len(state.subms)} submissions (generated {num_pdfs} PDFs)"
         state.info_popup_show_folder = out_dir
         ctx.status = None
@@ -436,59 +425,78 @@ def _task_pack_feedback_zip(ctx: AppContext) -> None:
         state, pstate = ctx.state, ctx.persistent_state
 
         ctx.status = app.Status("Choosing feedback folder")
-        start_dir = state.last_exported_folder if state.last_exported_folder != "" else None
+        start_dir = pstate.last_export_folder or None
 
-    folder_name = crossfiledialog.choose_folder("Choose feedback folder",
+    folder_path = crossfiledialog.choose_folder("Choose feedback folder",
         start_dir)  # ty: ignore[invalid-argument-type]
     with ctx.lock:
-        if folder_name == "" or folder_name is None:
+        if folder_path == "" or folder_path is None:
             ctx.status = None
             return
 
-        tomldata = tomllib.loads(app.read_file_str(os.path.join(folder_name, "eprtool.toml")))
+        re_incl_feedback_files = re.compile(
+            "|".join(glob.translate(g) for g in pstate.include_feedback_files.split(",")),
+            flags=re.IGNORECASE|re.UNICODE,
+        )
 
-        excercise, group = tomldata["excercise"], tomldata["group"]
-        assert isinstance(excercise, str)
-        assert isinstance(group, str)
+        folder_path = Path(folder_path)
+        zip_path = folder_path / (folder_path.absolute().name+"_annotated.zip")
 
-        def filename_with_suffix(fname: str, suffix: str) -> str:
-            root, ext = os.path.splitext(fname)
-            return root+suffix+ext
-
-        total_files = 0
         packed_files = 0
+        unannotated_pdfs = []
 
-        zip_path = os.path.join(folder_name, os.path.basename(folder_name)+"_annotated.zip")
         with zipfile.ZipFile(zip_path, "w") as ar:
-            for subm in tomldata["submissions"].values():
-                subm_dir = os.path.join(folder_name, f"{subm["stud-name"]}_{subm["stud-id"]}")
-                subm_zip_dir = f"{subm["stud-name"]}_{subm["stud-id"]}_assignsubmission_file"
-                have_pdf = False
-                for finfo in subm["files"]:
-                    if finfo["kind"] == "embed":
-                        have_pdf = True
-                    elif finfo["kind"] == "separate":
-                        total_files += 1
-                        file_path = os.path.join(subm_dir, filename_with_suffix(finfo["custom-name"], pstate.pdf_suffix))
-                        if os.path.isfile(file_path):
-                            ar.write(file_path,
-                                arcname=f"{subm_zip_dir}/Feedback_{excercise}_{subm["stud-name"]}_{finfo["custom-name"].replace("/", "_")}")
-                            packed_files += 1
+            ctx.status = app.Status("Creating archive")
+
+            for subm_path in folder_path.iterdir():
+                m = RE_EXPORTED_SUBM_FOLDER.match(subm_path.name)
+                if m is None:
+                    continue
+
+                stud_name, stud_id = m["name"], m["id"]
+                subm_dir_in_zip = f"{stud_name}_{stud_id}_assignsubmission_file"
+                feedback_pfx = f"Feedback_{folder_path.absolute().name}_{stud_name}"
+
+                code_pdf_name = f"{stud_name}_{stud_id}.pdf"
+
+                missing_annotated_version: set[str] = {code_pdf_name}
+
+                for p in (subm_path/"files").iterdir():
+                    if (subm_path/p.name).is_file():
+                        # In subm dir and "files/" -> handed-in PDF
+                        # that must be annotated.
+                        missing_annotated_version.add(p.name)
+
+                for fpath in subm_path.iterdir():
+                    if not fpath.is_file():
+                        continue
+                    if not re_incl_feedback_files.match(fpath.name):
+                        continue
+                    if fpath.name in missing_annotated_version:
+                        # We want the annotated version, not the base version.
+                        continue
+                    unannot_name = None
+                    for sfx in ("_kommentiert", "_annotated"):
+                        if fpath.stem.endswith(sfx):
+                            unannot_name = fpath.stem[:-len(sfx)] + fpath.suffix
+                            missing_annotated_version.discard(unannot_name)
+                            break
+                    if unannot_name == code_pdf_name:
+                        ar_name = f"{feedback_pfx}.pdf"
                     else:
-                        assert finfo["kind"] == "ignore"
-                if have_pdf:
-                    total_files += 1
-                    file_path = os.path.join(subm_dir, filename_with_suffix(f"{subm["stud-name"]}_{subm["stud-id"]}.pdf", pstate.pdf_suffix))
-                    if os.path.isfile(file_path):
-                        ar.write(file_path,
-                            arcname=f"{subm_zip_dir}/Feedback_{excercise}_{subm["stud-name"]}.pdf")
-                        packed_files += 1
+                        ar_name = f"{feedback_pfx}_{fpath.name}"
+                    ar.write(fpath, arcname=f"{subm_dir_in_zip}/{ar_name}")
+                    packed_files += 1
+                
+                unannotated_pdfs += [f"{subm_path.name}/{p}" for p in missing_annotated_version]
 
         state.info_popup = ""
-        if packed_files != total_files:
-            state.info_popup += f"> [!WARNING]\n> Found {total_files-packed_files}/{total_files} unannotated PDFs!\n\n"
-        state.info_popup += "Successfully added feedback ZIP to folder."
-        state.info_popup_show_file = zip_path
+        if len(unannotated_pdfs):
+            state.info_popup += f"> [!WARNING]\n> Found {len(unannotated_pdfs)} unannotated PDFs:\n"
+            state.info_popup += "".join(f"> - `{p}`\n" for p in unannotated_pdfs)
+            state.info_popup += "\n"
+        state.info_popup += f"Successfully created feedback ZIP containing {packed_files} files in folder."
+        state.info_popup_show_file = str(zip_path)
         ctx.status = None
 
 def _task_lint_files(ctx: AppContext):
@@ -531,17 +539,18 @@ def draw_gui(ctx: AppContext) -> None:
     imgui.same_line()
     if imgui.button("Pack feedback ZIP"):
         ctx.tpe.submit(_task_pack_feedback_zip, ctx)
-    imgui.same_line()
-    if imgui.button("?"):
+
+    if imgui.button("Help"):
         imgui.open_popup("Help")
     imgui.set_item_tooltip("Help")
-
-    if imgui.tree_node("Settings"):
+    imgui.same_line()
+    if imgui.button("Settings"):
+        imgui.open_popup("Settings")
+    if imgui.begin_popup("Settings"):
         ctx.draw_settings()
         if imgui.button("Reset UI dock layout"):
             state.force_rebuild_dock_layout = True
-        imgui.tree_pop()
-        imgui.spacing()
+        imgui.end_popup()
 
     if state.subms is not None:
         ui.object_field_input_text("Excercise", state, "excercise", "e.g. Uebung 0")
@@ -586,6 +595,8 @@ def draw_gui(ctx: AppContext) -> None:
         rich_md.pop_selectable_text()
     imgui.end()
 
+    if ctx.persistent_state_just_changed:
+        state.update_code_preview = True
     if state.update_code_preview and state.subms is not None and state.subm_idx < len(state.subms):
         subm = state.subms[state.subm_idx]
         cinfos = state.subm_file_cinfos[subm.stud_id]

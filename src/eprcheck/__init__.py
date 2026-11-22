@@ -82,8 +82,11 @@ def _task_open_folder(ctx: AppContext):
         return
 
     with ctx.lock:
-        if folder_name not in pstate.last_opened_folders:
-            pstate.last_opened_folders.append(folder_name)
+        try:
+            pstate.last_opened_folders.remove(folder_name)
+        except ValueError:
+            pass
+        pstate.last_opened_folders.append(folder_name)
         ctx.persistent_state_signal_changed()
         state.curr_folder = Path(folder_name)
         state.folder_newly_selected = True
@@ -92,15 +95,17 @@ def _task_open_folder(ctx: AppContext):
 def _task_lint_files(ctx: AppContext, files: list[Path]) -> None:
     with ctx.lock:
         state = ctx.state
+        pstate = ctx.persistent_state
         if state.curr_folder is None:
             return
         project_root = state.curr_folder
+        cfg = stylecheck.Config(pstate.style_max_line_length)
 
     for f in files:
         with ctx.lock:
             data = app.read_file_bytes(f)
             rel_path = norm_filename(f, project_root)
-        msgs = stylecheck.check(rel_path, data, stylecheck.Config(), str(project_root))
+        msgs = stylecheck.check(rel_path, data, cfg, str(project_root))
         with ctx.lock:
             state.codeviewer.set_file_messages(rel_path, msgs)
 
@@ -130,6 +135,11 @@ def draw_gui(ctx: AppContext) -> None:
         imgui.internal.dock_builder_finish(dock_id)
         state.force_rebuild_dock_layout = False
     imgui.dock_space(dock_id)
+
+    # TODO: This may cause duplicate linting (see comment on stylecheck._g_lock).
+    if ctx.persistent_state_just_changed and state.curr_folder is not None:
+        ctx.tpe.submit(_task_lint_files, ctx,
+            [Path(state.curr_folder)/fname for fname in state.codeviewer.get_files()])
 
     if state.folder_newly_selected and state.curr_folder is not None:
         state.curr_file_contents = {}

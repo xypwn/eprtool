@@ -1,9 +1,10 @@
 """EPR-conformant style checking
 """
-
 import contextlib
 import io
+import pathlib
 import sys
+import threading
 import typing
 from dataclasses import dataclass
 
@@ -73,9 +74,9 @@ class Message:
     msg: str # readable description
 
     @classmethod
-    def from_pylint(cls, msg: pylint.message.Message) -> "Message":
+    def from_pylint(cls, msg: pylint.message.Message) -> Message:
         return Message(
-            msg.path,
+            pathlib.PurePath(msg.path).as_posix(),
             msg.line,
             msg.column + 1,
             msg.end_line,
@@ -88,7 +89,7 @@ class Message:
     def __str__(self) -> str:
         return f"{self.source}: {self.filename}:{self.line}:{self.column}: {self.msg_id} {self.msg}"
 
-    def __lt__(self, other: "Message") -> bool:
+    def __lt__(self, other: Message) -> bool:
         # Compare field-by-field, respecing None
         for k in Message.__dataclass_fields__:
             a = self.__dict__[k]
@@ -115,8 +116,9 @@ class _PEP8MessageReport(pycodestyle.BaseReport):
     def error(self, line_number, offset, text, check):
         code = super().error(line_number, offset, text, check)
         if code:
+            fname = self.override_filename or self.filename
             self.eprmessages.append(Message(
-                self.override_filename or self.filename,
+                pathlib.PurePath(fname).as_posix(),
                 line_number,
                 offset+1,
                 None,
@@ -140,43 +142,49 @@ def _checker_context(data: bytes):
     yield
     sys.stdin = prev_stdin
 
+# HACK: Prevent different linters from running in parallel (e.g. this happens in eprcheck when opening a folder,
+# which triggers the linters, but the folder opening also changes pstate, which triggers another re-lint)
+# FIXME: We need to find a better long-term solution for this.
+_g_lock = threading.Lock()
+
 def check(filename: str, file_data: bytes | None = None, cfg: Config = _DEFAULT_CONFIG, project_root: str | None = None) -> list[Message]:
-    if file_data is None:
-        with open(filename, "rb") as f:
-            file_data = f.read()
+    with _g_lock:
+        if file_data is None:
+            with open(filename, "rb") as f:
+                file_data = f.read()
 
-    msgs: list[Message] = []
-    with _checker_context(file_data):
-        reporter = pylint.reporters.CollectingReporter()
-        args = [
-            "--load-plugins=common.pylint_epr,pylint.extensions.docstyle,pylint.extensions.dunder,pylint.extensions.private_import",
-            "--disable=all",
-            f"--enable={",".join(_PYLINT_MESSAGE_IDS)}",
-            "--from-stdin",
-            filename
-        ]
-        if project_root is not None:
-            args.append("--source-roots="+project_root)
-        pylint.lint.Run(args,
-            reporter=reporter,
-            exit=False)
-        msgs += [Message.from_pylint(msg) for msg in reporter.messages]
+        msgs: list[Message] = []
+        with _checker_context(file_data):
+            reporter = pylint.reporters.CollectingReporter()
+            args = [
+                "--load-plugins=common.pylint_epr,pylint.extensions.docstyle,pylint.extensions.dunder,pylint.extensions.private_import",
+                "--disable=all",
+                f"--enable={",".join(_PYLINT_MESSAGE_IDS)}",
+                "--from-stdin",
+                filename
+            ]
+            if project_root is not None:
+                args.append("--source-roots="+project_root)
+            pylint.lint.Run(args,
+                reporter=reporter,
+                exit=False)
+            msgs += [Message.from_pylint(msg) for msg in reporter.messages]
 
-    with _checker_context(file_data):
-        ignore = pycodestyle.DEFAULT_IGNORE.split(",")
-        if cfg.max_line_length == 0:
-            ignore.append("E501")
-        style_guide = pycodestyle.StyleGuide(quiet=True,
-            max_line_length=cfg.max_line_length,
-            ignore=ignore)
-        report = style_guide.init_report(_PEP8MessageReport)
-        assert isinstance(report, _PEP8MessageReport)
-        report.override_filename = filename
-        report.filename = filename
-        checker = style_guide.checker_class("-", options=style_guide.options)
-        checker.check_all()
-        msgs += report.eprmessages
+        with _checker_context(file_data):
+            ignore = pycodestyle.DEFAULT_IGNORE.split(",")
+            if cfg.max_line_length == 0:
+                ignore.append("E501")
+            style_guide = pycodestyle.StyleGuide(quiet=True,
+                max_line_length=cfg.max_line_length,
+                ignore=ignore)
+            report = style_guide.init_report(_PEP8MessageReport)
+            assert isinstance(report, _PEP8MessageReport)
+            report.override_filename = filename
+            report.filename = filename
+            checker = style_guide.checker_class("-", options=style_guide.options)
+            checker.check_all()
+            msgs += report.eprmessages
 
-    msgs.sort()
+        msgs.sort()
 
-    return msgs
+        return msgs

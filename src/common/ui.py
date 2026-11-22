@@ -110,6 +110,23 @@ def end_modal_box(extra_button_labels: list[str]|None = None) -> typing.Literal[
     imgui.end_popup()
     return pressed
 
+def modal_yesno_text(name: str, text: str, yes_text: str = "Yes", no_text: str = "No") -> bool:
+    res = False
+    imgui.set_next_window_size_constraints((200, 0), (imgui.FLT_MAX, imgui.FLT_MAX))
+    imgui.set_next_window_pos(imgui.get_main_viewport().get_center(), imgui.Cond_.always, (0.5, 0.5))
+    if imgui.begin_popup_modal(name, None, imgui.WindowFlags_.always_auto_resize|imgui.WindowFlags_.no_move)[0]:
+        imgui.text_wrapped(text)
+        align_button_row([yes_text, no_text], "center")
+        if imgui.button(yes_text):
+            imgui.close_current_popup()
+            res = True
+        imgui.same_line()
+        if imgui.button(no_text):
+            imgui.close_current_popup()
+        imgui.end_popup()
+    return res
+
+
 _MARKDOWN_NEED_ESC = set(r"\`*_{}[]()#+-.! ")
 
 def _template_markdown(tpl: templatelib.Template) -> str:

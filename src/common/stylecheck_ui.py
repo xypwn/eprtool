@@ -23,8 +23,8 @@ def message_to_cte_doc_pos(msg: stylecheck.Message) -> tuple[imgui_cte.TextEdito
     return start, end
 
 def load_msg_annots(te: imgui_cte.TextEditor, msgs: list[stylecheck.Message]) -> None:
-    ERROR_BG = imgui.IM_COL32(220, 50, 50, 56)
-    ERROR_FG = imgui.IM_COL32(220, 50, 50, 255)
+    #ERROR_BG = imgui.IM_COL32(220, 50, 50, 56)
+    #ERROR_FG = imgui.IM_COL32(220, 50, 50, 255)
     WARN_BG = imgui.IM_COL32(180, 140, 0, 48)
     WARN_FG = imgui.IM_COL32(180, 140, 0, 255)
 
@@ -85,6 +85,9 @@ class CodeViewer:
         if fname == self._sel_file:
             self._load_file(fname)
 
+    def get_files(self) -> list[str]:
+        return list(self._files.keys())
+
     def num_files(self) -> int:
         return len(self._files)
 
@@ -127,8 +130,9 @@ class CodeViewer:
         imgui.push_id(str_id)
         imgui.begin_child("##Messages", (0, 0))
         for filename in sorted(self._messages.keys()):
-            imgui.push_id(f"MESSAGE/{filename}")
+            imgui.push_id(f"Message/{filename}")
             msgs = self._messages[filename]
+            imgui.set_next_item_storage_id(imgui.get_id("Node/"+filename))
             if imgui.tree_node(f"{filename} ({len(msgs)})"):
                 for i, msg in enumerate(msgs):
                     imgui.push_id(i)
