@@ -42,4 +42,4 @@ Recommended software: [xournalpp](https://xournalpp.github.io/).
 For a PDF file `original_name.pdf`, the annotated version is is expected to be `original_name_annotated.pdf` or `original_name_kommentiert.pdf`.
 
 #### 6. Repack ZIP
-Once every PDF has been annotated, click "Pack feedback ZIP". Select the feedback folder. A .zip file will appear inside, which can be uploaded to Moodle via "Upload feedback files as ZIP".
+Once every PDF has been annotated, click "Pack feedback ZIP". Select the feedback folder. A .zip file will appear inside, which can be uploaded to Moodle via "Upload feedback files in a zip".

@@ -9,8 +9,10 @@ from imgui_bundle import imgui, rich_md
 def is_item_double_clicked(mouse_button: imgui.MouseButton = imgui.MouseButton_.left) -> bool:
     return imgui.is_item_clicked(mouse_button) and imgui.is_mouse_double_clicked(mouse_button)
 
-def object_field_input_text(label: str, obj: object, obj_field: str, hint: str = "", flags: imgui.InputTextFlags = imgui.InputTextFlags_.none) -> bool:
+def object_field_input_text(label: str, obj: object, obj_field: str, hint: str = "", flags: imgui.InputTextFlags = imgui.InputTextFlags_.none, *, right_align_label: bool = False) -> bool:
     s = obj.__dict__[obj_field]
+    if right_align_label:
+        imgui.set_next_item_width(-imgui.calc_text_size(label).x)
     changed, s_new = imgui.input_text_with_hint(label, hint, s, flags)
     if changed:
         obj.__dict__[obj_field] = s_new

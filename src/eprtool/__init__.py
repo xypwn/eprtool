@@ -81,12 +81,12 @@ TYPST_IMAGE_FORMATS = {
 @dataclass
 class SingleSubmission:
     stud_name: str
-    stud_id: str
+    stud_id: str # submission-local student Moodle ID, not actual ID
     filename: str
     files: dict[str, str|bytes]
     is_manually_added: bool = False
 
-    def folder_name(self) -> str:
+    def stud_key(self) -> str:
         return f"{self.stud_name}_{self.stud_id}"
 
 RE_EXPORTED_SUBM_FOLDER = re.compile(r"^(?P<name>.+)_(?P<id>\d+)$")
@@ -121,8 +121,13 @@ class FileKind:
     is_image: bool
     is_recognized: bool
 
+@dataclass
+class ManualSubmInfo:
+    stud_name: str = ""
+    stud_id: str = ""
+
 # Submission may be ZIP or single file
-def submission_files_from_zip_or_file(filename: str, stud_name_if_single_subm_file: str|None = None) -> SubmissionFilesResult:
+def submission_files_from_zip_or_file(filename: str, manual_subm: ManualSubmInfo | None = None) -> SubmissionFilesResult:
     # Automatically decodes bytes into a string, guessing the encoding.
     def auto_str(b: bytes) -> str:
         enc = chardet.detect(b, include_encodings=["utf-8", "437"])["encoding"]
@@ -169,12 +174,12 @@ def submission_files_from_zip_or_file(filename: str, stud_name_if_single_subm_fi
                     files[filename] = data
         return files
 
-    if stud_name_if_single_subm_file is not None:
+    if manual_subm is not None:
         with open(filename, "rb") as f:
             fname = os.path.basename(filename)
             result.submissions.append(SingleSubmission(
-                stud_name_if_single_subm_file,
-                stud_name_if_single_subm_file, # name becomes ID in this case (TODO: See if reasonable)
+                manual_subm.stud_name,
+                manual_subm.stud_id,
                 fname,
                 submission_file_to_files(fname, f),
                 is_manually_added=True,
@@ -230,7 +235,7 @@ class State:
     excercise: str = ""
     group: str = ""
 
-    manual_subm_name: str = ""
+    manual_subm: ManualSubmInfo = field(default_factory=ManualSubmInfo)
 
     update_code_preview: bool = False
 
@@ -247,13 +252,13 @@ type AppContext = app.MainContext[State, PersistentState]
 
 RE_GUESS_EXCERCISE_GROUP = re.compile(r"^[\w ]+?\d+[\w -]+?(?P<ex>\d+)[\w -]+?(?P<gr>\d+)", re.UNICODE)
 
-def _task_open_submission_or_submissions(ctx: AppContext, stud_name_if_single_subm_file: str|None = "") -> None:
+def _task_open_submission_or_submissions(ctx: AppContext, manual_subm: ManualSubmInfo | None = None) -> None:
     with ctx.lock:
         state = ctx.state
         ctx.status = app.Status("Choosing file")
         start_dir = ctx.dirs.user_downloads_dir
 
-    single_subm_file = stud_name_if_single_subm_file is not None
+    single_subm_file = manual_subm is not None
 
     # TODO: Decide which dialog type to use
     #fname = filedialog.askopenfilename(filetypes=(("ZIP Archive", "*.zip"),), title="Open submission archive")
@@ -276,7 +281,7 @@ def _task_open_submission_or_submissions(ctx: AppContext, stud_name_if_single_su
             else:
                 state.info_popup += "- Unable to auto-detect excercise and group number. Please enter manually.\n"
 
-        submission_files = submission_files_from_zip_or_file(fname, stud_name_if_single_subm_file)
+        submission_files = submission_files_from_zip_or_file(fname, manual_subm)
         if not single_subm_file:
             # If we got a submission archive, we want to replace old
             # submissions.
@@ -370,7 +375,7 @@ def _task_export_to_feedback_folder(ctx: AppContext) -> None:
                 "{name}", subm.stud_name).replace(
                 "{tutor}", pstate.group_tutor)
 
-        subm_dir = os.path.join(out_dir, subm.folder_name())
+        subm_dir = os.path.join(out_dir, subm.stud_key())
         with ctx.lock:
             ctx.status = app.Status(t"Unpacking files and compiling PDFs ({i}/{len(subms)})", i/len(subms))
         typst_code: list[str] = []
@@ -582,11 +587,13 @@ def draw_gui(ctx: AppContext) -> None:
                 state.update_code_preview = True
 
         imgui.separator_text("Add manual submission")
-        imgui.set_next_item_width(-imgui.calc_text_size("Submitter name").x)
-        ui.object_field_input_text("Submitter name", state, "manual_subm_name")
-        imgui.begin_disabled(state.manual_subm_name == "")
+        ui.object_field_input_text("Submitter name", state.manual_subm, "stud_name", right_align_label=True)
+        imgui.set_item_tooltip("Submitter's full name")
+        ui.object_field_input_text("Submitter ID", state.manual_subm, "stud_id", flags=imgui.InputTextFlags_.chars_decimal, right_align_label=True)
+        imgui.set_item_tooltip('Unique Moodle per-submission ID\nCan be found via "Download grading worksheet" in the "ID" column (just the number)')
+        imgui.begin_disabled(state.manual_subm.stud_name == "" or state.manual_subm.stud_id == "")
         if imgui.button("Select submission file"):
-            ctx.tpe.submit(_task_open_submission_or_submissions, ctx, state.manual_subm_name)
+            ctx.tpe.submit(_task_open_submission_or_submissions, ctx, state.manual_subm)
         imgui.end_disabled()
     else:
         rich_md.push_selectable_text(False)
