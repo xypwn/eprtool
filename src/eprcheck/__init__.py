@@ -110,6 +110,40 @@ def _task_lint_files(ctx: AppContext, files: list[Path]) -> None:
         with ctx.lock:
             state.codeviewer.set_file_messages(rel_path, msgs)
 
+def is_included_py_filename(name: str) -> bool:
+    path = PurePath(name)
+    if path.name in IGNORED_FILES:
+        return False
+    if path.suffix.lower() != ".py":
+        return False
+    for p in path.parents:
+        if p.name in IGNORED_DIRS:
+            return False
+    return True
+
+def walk_py_files(dir_or_file: str | Path, limit: int = 5000) -> list[Path]:
+    """Takes a directory or file and returns a list of .py file paths.
+
+    Excludes ``IGNORED_DIRS`` and ``IGNORED_FILES``.
+
+    If more than limit files are found, an exception is raised.
+    """
+    res = []
+    if os.path.isfile(dir_or_file):
+        if is_included_py_filename(os.path.basename(dir_or_file)):
+            res.append(Path(dir_or_file))
+        return res
+
+    for dirpath, dirs, files in os.walk(dir_or_file):
+        dirs[:] = [n for n in dirs if n not in IGNORED_DIRS]
+        files[:] = [n for n in files if n not in IGNORED_FILES]
+        for f in files:
+            if is_included_py_filename(f):
+                if len(res) >= limit:
+                    raise Exception(f"Too many files (exceeded limit of {limit} files)")
+                res.append(Path(dirpath)/f)
+    return res 
+
 def draw_gui(ctx: AppContext) -> None:
     state = ctx.state
 
@@ -145,15 +179,9 @@ def draw_gui(ctx: AppContext) -> None:
     if state.folder_newly_selected and state.curr_folder is not None:
         state.curr_file_contents = {}
         state.codeviewer.clear()
-        py_files = []
-        for dirpath, dirs, files in os.walk(state.curr_folder):
-            dirs[:] = [n for n in dirs if n not in IGNORED_DIRS]
-            files[:] = [n for n in files if n not in IGNORED_FILES]
-            for f in files:
-                if os.path.splitext(f)[1].lower() == ".py":
-                    py_files.append(Path(dirpath)/f)
-        for f in py_files:
-            name, data = norm_filename(f, state.curr_folder), app.read_file_str(f)
+        py_files = walk_py_files(state.curr_folder)
+        for fname_rel in py_files:
+            name, data = norm_filename(fname_rel, state.curr_folder), app.read_file_str(fname_rel)
             state.curr_file_contents[name] = data
             state.codeviewer.set_file(name, data)
         state.file_event_observer.unschedule_all()
@@ -186,8 +214,6 @@ def draw_gui(ctx: AppContext) -> None:
             to_reload = set()
             deleted = set()
             for evt in evts:
-                if evt.is_directory:
-                    continue
                 src = evt.src_path
                 if isinstance(src, bytes):
                     src = src.decode()
@@ -198,23 +224,37 @@ def draw_gui(ctx: AppContext) -> None:
                 dest = Path(dest)
                 match evt.event_type:
                     case "created" | "modified":
-                        to_reload.add(src)
+                        if not evt.is_directory:
+                            to_reload.add(src)
                     case "moved":
-                        if src.is_relative_to(state.curr_folder):
-                            deleted.add(src)
-                        if dest.is_relative_to(state.curr_folder):
-                            to_reload.add(dest)
+                        if not evt.is_directory:
+                            if src.is_relative_to(state.curr_folder):
+                                deleted.add(src)
+                            if dest.is_relative_to(state.curr_folder):
+                                to_reload.add(dest)
                     case "deleted":
-                        deleted.add(src)
+                        # When a folder is deleted, its children don't emit an
+                        # event, so we have to handle this manually.
+                        #
+                        # Also, for some reason, it doesn't set evt.is_directory
+                        # correctly.
+                        for fname_rel in state.curr_file_contents:
+                            fname = state.curr_folder/fname_rel
+                            if fname.is_relative_to(src):
+                                deleted.add(fname)
+
+            to_reload = {f for f in to_reload
+                if is_included_py_filename(str(f.relative_to(state.curr_folder)))}
             to_reload -= deleted
             to_reload = sorted(to_reload)
             deleted = sorted(deleted)
-            for f in deleted:
-                name = norm_filename(f, state.curr_folder)
+
+            for fname_rel in deleted:
+                name = norm_filename(fname_rel, state.curr_folder)
                 state.curr_file_contents.pop(name, None)
                 state.codeviewer.set_file(name, None)
-            for f in to_reload:
-                name, data = norm_filename(f, state.curr_folder), app.read_file_str(f)
+            for fname_rel in to_reload:
+                name, data = norm_filename(fname_rel, state.curr_folder), app.read_file_str(fname_rel)
                 old_data = state.curr_file_contents.get(name, None)
                 state.curr_file_contents[name] = data
                 state.codeviewer.set_file(name, data)

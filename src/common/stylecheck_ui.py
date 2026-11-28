@@ -149,7 +149,7 @@ class CodeViewer:
 
     def draw_file_tree(self, str_id: str, on_click: typing.Callable[[str], None] | None = None) -> None:
         imgui.push_id(str_id)
-        imgui.push_style_var(imgui.StyleVar_.indent_spacing, 10)
+        imgui.push_style_var(imgui.StyleVar_.indent_spacing, 15)
         paths = sorted(posixpath.normpath(f) for f in self._files)
         type Tree = dict[str, Tree] | None
         tree: Tree = {}
@@ -178,7 +178,8 @@ class CodeViewer:
                             draw_tree(child, child_path)
                             imgui.tree_pop()
                     else:
-                        if imgui.selectable(name, self._sel_file == child_path)[0]:
+                        label = f"{name} ({len(self._messages.get(child_path, []))})"
+                        if imgui.selectable(label, self._sel_file == child_path)[0]:
                             self.select_file(child_path)
                             if on_click is not None:
                                 on_click(child_path)
