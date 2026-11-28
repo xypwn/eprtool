@@ -132,15 +132,18 @@ class _PEP8MessageReport(pycodestyle.BaseReport):
 @dataclass
 class Config:
     max_line_length: int = 79 # 0 to disable
+    require_english_docstrings: bool = True
 
 _DEFAULT_CONFIG = Config()
 
 @contextlib.contextmanager
 def _checker_context(data: bytes):
     prev_stdin = sys.stdin
-    sys.stdin = io.TextIOWrapper(io.BytesIO(data))
-    yield
-    sys.stdin = prev_stdin
+    try:
+        sys.stdin = io.TextIOWrapper(io.BytesIO(data))
+        yield
+    finally:
+        sys.stdin = prev_stdin
 
 # HACK: Prevent different linters from running in parallel (e.g. this happens in eprcheck when opening a folder,
 # which triggers the linters, but the folder opening also changes pstate, which triggers another re-lint)
@@ -155,11 +158,15 @@ def check(filename: str, file_data: bytes | None = None, cfg: Config = _DEFAULT_
 
         msgs: list[Message] = []
         with _checker_context(file_data):
+            pylint_message_ids = _PYLINT_MESSAGE_IDS[:]
+            if not cfg.require_english_docstrings:
+                pylint_message_ids.remove("C3321")
+
             reporter = pylint.reporters.CollectingReporter()
             args = [
                 "--load-plugins=common.pylint_epr,pylint.extensions.docstyle,pylint.extensions.dunder,pylint.extensions.private_import",
                 "--disable=all",
-                f"--enable={",".join(_PYLINT_MESSAGE_IDS)}",
+                f"--enable={",".join(pylint_message_ids)}",
                 "--from-stdin",
                 filename
             ]

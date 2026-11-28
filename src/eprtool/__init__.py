@@ -519,7 +519,8 @@ def _task_lint_files(ctx: AppContext):
                 fdata = subm.files[finfo.filename]
                 if Path(fname).suffix == ".py" and isinstance(fdata, str):
                     file_data.append((fname, fdata.encode(errors="ignore")))
-        cfg = stylecheck.Config(pstate.style_max_line_length)
+        cfg = stylecheck.Config(pstate.style_max_line_length,
+            pstate.style_require_english_docstrings)
 
     for i, (fname, data) in enumerate(file_data):
         #with ctx.lock:

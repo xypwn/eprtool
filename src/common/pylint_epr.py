@@ -9,7 +9,8 @@ from simplemma import LanguageDetector
 if TYPE_CHECKING:
     from pylint.lint import PyLinter
 
-RE_AUTHOR_VARIABLE = re.compile(r"^\d+, [\w'-]+(, \d+, [\w'-]+)*$", re.UNICODE)
+RE_AUTHOR_VARIABLE = re.compile(r"^\d+, [\w' -]+(, \d+, [\w' -]+)*$", re.UNICODE)
+RE_AUTHOR_VARIABLE_LASTNAMES = re.compile(r"\d+, (?P<lastname>[\w' -]+)(?=, |$)", re.UNICODE)
 RE_AI_USAGE_COMMENT = re.compile(r"^# ?(generated|made|done|written) (with|without) (support of )?AI.*$", re.UNICODE|re.IGNORECASE)
 # FIXME: Doesn't detect if string delims match.
 # TODO: Decide if accepting any credits is good enough or if the string must contain specific elements.
@@ -45,6 +46,11 @@ class EprChecker(BaseChecker):
             'Malformed __author__ value %r (format should be "1234567, Lastname" or "1234567, Lastname1, 7654321, Lastname2" for multiple authors)',
             "malformed-author-value",
             "Used if __author__ string is formatted incorrectly.",
+        ),
+        "C3305": (
+            'Warning: Space in __author__ last name(s) %s. Ignore this if the last name actually contains a space.',
+            "space-in-author-last-name",
+            "Used if __author__ value last name contains a space. Warning only as some last names contain spaces.",
         ),
         "C3311": (
             "Ambiguous variable name %r (may be confused with %r)",
@@ -99,6 +105,11 @@ class EprChecker(BaseChecker):
             v = n.value.value
             if RE_AUTHOR_VARIABLE.match(v) is None:
                 self.add_message("malformed-author-value", node=n.value, args=(v,))
+                return
+            space_lastnames = ", ".join(repr(m["lastname"])
+                for m in RE_AUTHOR_VARIABLE_LASTNAMES.finditer(v) if " " in m["lastname"])
+            if len(space_lastnames):
+                self.add_message("space-in-author-last-name", node=n.value, args=(space_lastnames,))
                 return
         if not found:
             self.add_message("missing-author-variable", node=module)

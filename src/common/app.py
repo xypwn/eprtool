@@ -127,10 +127,13 @@ class MainContext[State, PersistentState]:
             tooltip = str(metadata.get("tooltip", ""))
             validate = metadata.get("validate", lambda _: True)
             typ = field.type
+            assert isinstance(typ, type)
             v = values[k]
-            changed, v = imgui.input_text_with_hint(label, hint, str(v))
+            if issubclass(typ, bool):
+                changed, v = imgui.checkbox(label, bool(v))
+            else:
+                changed, v = imgui.input_text_with_hint(label, hint, str(v))
             if changed:
-                assert isinstance(typ, type)
                 try:
                     v = typ(v)
                     ok = True

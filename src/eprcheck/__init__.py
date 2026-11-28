@@ -87,6 +87,7 @@ def _task_open_folder(ctx: AppContext):
         except ValueError:
             pass
         pstate.last_opened_folders.append(folder_name)
+        ctx.persistent_state_signal_changed()
         state.curr_folder = Path(folder_name)
         state.folder_newly_selected = True
     ctx.status = None
@@ -98,7 +99,8 @@ def _task_lint_files(ctx: AppContext, files: list[Path]) -> None:
         if state.curr_folder is None:
             return
         project_root = state.curr_folder
-        cfg = stylecheck.Config(pstate.style_max_line_length)
+        cfg = stylecheck.Config(pstate.style_max_line_length,
+            pstate.style_require_english_docstrings)
 
     for f in files:
         with ctx.lock:
